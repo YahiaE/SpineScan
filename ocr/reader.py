@@ -20,106 +20,101 @@ import time
 
 def main():
     url = r"D:\Projects\SpineScan\data\test2.jpg"
-    music_res = ocr(url)
+    ocr_data = ocr(url)
+    music_res = group_text_by_rows(ocr_data, threshold=35)
     print(music_res)
-    
-    prompt1_template = """
-Task:
-Extract and verify only valid artist names from noisy OCR-scanned text. Ignore album titles, catalog numbers, or label names.
+    prompt_template = """
+Objective
+Process raw OCR text lines from CD spines and covers to produce accurate, standardized "Artist - Album" format. The process should handle data cleaning, fuzzy error correction, disambiguation, and verification against a trusted music database, applicable to any artist or album.
 
-Output:
-Only output confirmed, valid artist names, one per line, in title case (e.g., Mary J. Blige). No duplicates.
+Workflow Steps
 
-Instructions and Constraints:
+Data Cleaning
 
-1. Immediate Discard Rules:
-• Discard any lines that contain only catalog numbers (e.g., ESCL 3259, JKCA-1030, XQCY1041, 82796 90920 2).
-• Discard lines containing record label keywords: RECORDS, LABEL, MUSIC GROUP, etc.
-• Discard known label names: EPIC, JULY, SONY, RCA, COLUMBIA, VIRGIN, etc.
-• Discard lines that contain only uppercase letters and digits with no lowercase.
-• Remove anything inside brackets [ ] or parentheses ( ).
-• Remove format tags: LP, CD, Reissue, Ltd., Remastered.
+Remove catalog numbers, label names, and non-essential text.
 
-2. OCR Correction:
-• Apply fuzzy matching or minor spelling correction (1–2 letter changes) to fix common OCR errors in names.
-• Only correct if the result matches a real artist in trusted databases.
+Discard lines that contain only identifiers or non-informative content.
 
-3. Verification:
-• Confirm each artist name using trusted sources (Discogs, AllMusic, MusicBrainz, RateYourMusic, or official artist websites).
-• Discard any names that cannot be verified as real musical artists.
-• Do not guess or infer — only output if verified as an artist.
+Extraction
 
-4. Output Formatting:
-• One artist per line.
-• Use title case (capitalize major words).
-• No duplicates.
-• No album names, catalog info, or additional text.
-• No explanations or extra commentary — just valid artist names.
+Parse remaining lines to extract possible artist and album names.
 
-SUMMARY:
-- Only extract valid artist names.
-- Do not output unless verified against real-world music databases.
-- Discard everything else.
+If only one name is confidently extracted, assign "Self-Titled" as the album.
+
+Fuzzy Correction & Disambiguation
+
+Use fuzzy string matching to correct OCR errors in artist and album names.
+
+Cross-reference with trusted music databases (e.g., Last.fm, MusicBrainz, Discogs).
+
+For each candidate name:
+
+Find the closest artist and album matches in the database using ≥85% similarity threshold.
+
+Prioritize matches where:
+
+Album name is exact, and artist name is similar in spelling or phonetics (e.g., "Kutt" ≈ "Kurt").
+
+Or vice versa — if the artist name is exact, but album name is fuzzy-match to a known album by that artist.
+
+If multiple potential matches exist:
+
+Select the pairing with the highest overall confidence (combined artist and album similarity).
+
+Use artist discography or known album pairings to resolve ambiguity.
+
+Validation Against Music Database
+
+Confirm that the "Artist - Album" pairing exists as a valid combination.
+
+If only one (artist or album) exists independently:
+
+Infer the most likely matching pair using artist discographies or popular album data.
+
+Use contextual logic: for instance, if album title is known and unique, prioritize artists with similar spelling.
+
+Final Output
+
+Output only verified "Artist - Album" results.
+
+Include uncertain entries only if the pairing is verified across multiple databases or the most likely combination is well-supported (e.g., popular on Last.fm).
+
+ONLY OUTPUT THE FINAL RESULT IN THE FOLLOWING FORMAT:
+Artist - Album
+...
+
+Do not include any intermediate logs, scores, or metadata — just the final cleaned and verified list.
+
 
 Input:
 {list_input}
 """
     
-    prompt1 = prompt1_template.format(list_input=music_res)
-    result1 = generateList(prompt1)
+    prompt = prompt_template.format(list_input=music_res)
+    result = generateList(prompt)
+    print(result.output[0].content[0].text)
 
-    prompt2_template = """
-Task:
-Using a provided list of valid artist names, scan the OCR-scanned lines again to extract and verify real album titles associated with those artists.
+def group_text_by_rows(ocr_results, threshold=35):
+    rows = []
 
-Only output confirmed artist/album pairs in the format:
-Artist Name: Album Title
+    for result in ocr_results:
+        text = result["text"]
+        bounding_box = result["bounding_box"]
+        avg_y = sum(bounding_box[1::2]) / 4  # Calculate the average vertical position of the bounding box
 
-Instructions and Constraints:
+        # Check if the text belongs to an existing row
+        for row in rows:
+            if abs(avg_y - row["avg_y"]) <= threshold:  # Compare vertical position with existing rows
+                row["texts"].append(text)
+                row["avg_y"] = (row["avg_y"] * len(row["texts"]) + avg_y) / (len(row["texts"]) + 1)  # Update average y
+                break
+        else:
+            # Create a new row if no existing row matches
+            rows.append({"texts": [text], "avg_y": avg_y})
 
-Input Reference:
-• Use the provided list of verified artist names.
-• Assume these are the only valid artists.
-• Discard all data that does not relate to one of these artists.
-
-Matching Album Titles:
-• If a line contains one of the valid artist names followed by other words, treat the remaining words as a possible album title.
-• If the artist name appears on one line and the next line appears to be a title (contains lowercase or mixed case), associate it using the artist as context.
-• If a line uses separators like slash, dash, or colon, split and match the artist to the corresponding title.
-
-Fuzzy Correction (only if needed):
-• Fix common OCR errors in album names, such as misspellings or punctuation mistakes, only if the corrected artist-album pair is verified in trusted databases.
-
-Strict Verification:
-• Check that each artist and album pair exists as a real release in trusted sources such as Discogs, MusicBrainz, AllMusic, RateYourMusic, or official artist sites.
-• Discard any unverified pairings; do not guess or substitute.
-• Do not assume a generic or random album title belongs to an artist unless confirmed.
-
-Formatting:
-• Output artist name, colon, album title (Artist Name: Album Title).
-• Use title case for both artist and album.
-• One verified pair per line.
-• No duplicates, no commentary, no album-only lines.
-
-Summary:
-
-Use only previously verified artists.
-
-Only output artist and album pairs that exist as real, published releases.
-
-Do not hallucinate or guess. If not confirmed, discard.
-
-
-Input Of Artists:
-{list_input}
-
-Original Data:
-{data}
-"""
-    prompt2 = prompt2_template.format(list_input=result1.output[0].content[0].text, data=music_res)
-    result2 = generateList(prompt2)
-   
-    print(result2.output[0].content[0].text)
+    # Convert rows into a single formatted string
+    result = "\n".join([", ".join(row["texts"]) for row in rows])
+    return result
 
 def generateList(prompt):
     load_dotenv()
@@ -134,50 +129,60 @@ def generateList(prompt):
 
 
 
-def ocr(url):
+def ocr(url, timeout=60):
+    """
+    Perform OCR on the given image URL with a timeout mechanism.
+
+    Args:
+        url (str): Path to the image file.
+        timeout (int): Maximum time (in seconds) to wait for the OCR operation to complete.
+
+    Returns:
+        list: OCR results containing text and bounding boxes.
+
+    Raises:
+        TimeoutError: If the OCR operation exceeds the timeout limit.
+        Exception: If the OCR operation fails.
+    """
     results = []
     subscription_key = os.getenv("VISION_KEY")
     endpoint = os.getenv("VISION_ENDPOINT")
+    
+    if not subscription_key or not endpoint:
+        raise ValueError("VISION_KEY or VISION_ENDPOINT is not set in the environment variables.")
+    
+    if not os.path.exists(url):
+        raise FileNotFoundError(f"Image file not found: {url}")
+    
     computervision_client = ComputerVisionClient(endpoint, CognitiveServicesCredentials(subscription_key))
     
-    with open(url, "rb") as image_stream: # Using in_stream due to using local file
+    with open(url, "rb") as image_stream:
         read_response = computervision_client.read_in_stream(image_stream, raw=True)
 
-    read_operation_location = read_response.headers["Operation-Location"] # URL to check the results of reading the image
-    operation_id = read_operation_location.split("/")[-1] # ID apart of the URL, passed into a function to check the status and output of our results
+    read_operation_location = read_response.headers["Operation-Location"]
+    operation_id = read_operation_location.split("/")[-1]
+
+    start_time = time.time()  # Record the start time
 
     while True:
-
-        read_result = computervision_client.get_read_result(operation_id) # Check if the azure OCR service has gotten the results from the ID
-        if read_result.status not in ['notStarted', 'running']: # If the status is completed (not in progress), exit the loop
+        read_result = computervision_client.get_read_result(operation_id)
+        if read_result.status not in ['notStarted', 'running']:
             break
-        time.sleep(1) # Wait for 1 second before checking again
+        if time.time() - start_time > timeout:  # Check if the timeout limit is exceeded
+            raise TimeoutError("OCR operation timed out.")
+        time.sleep(1)  # Wait for 1 second before checking again
 
-    if read_result.status == OperationStatusCodes.succeeded: # If the status of getting the results is complete 
-        for text_result in read_result.analyze_result.read_results: 
-            for line in text_result.lines: # Read and print through each line of the results
-                results.append(line.text)
+    if read_result.status == OperationStatusCodes.succeeded:
+        for text_result in read_result.analyze_result.read_results:
+            for line in text_result.lines:
+                results.append({
+                    "text": line.text,
+                    "bounding_box": line.bounding_box
+                })
+    else:
+        raise Exception(f"OCR operation failed with status: {read_result.status}")
     
-    return "\n".join(results)
-
-
-    
-
-
-
-
-
-
-
-
-    
-    # with open(file, 'r', encoding='utf-8') as f:
-    #     data = json.load(f)
-    #     text_lines = data[filename][0]['text_lines']
-    #     for line in text_lines:
-    #         music.append(line['text'])
-    
-    # return "\n".join(music)
+    return results
 
 
 if __name__ == "__main__":
