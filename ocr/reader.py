@@ -7,6 +7,7 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 load_dotenv()
+from preprocessing import preprocess_image
 from azure.cognitiveservices.vision.computervision import ComputerVisionClient
 from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
 from azure.cognitiveservices.vision.computervision.models import VisualFeatureTypes
@@ -19,8 +20,9 @@ import time
 
 
 def main():
-    url = r"D:\Projects\SpineScan\data\test2.jpg"
-    ocr_data = ocr(url)
+    url = r"D:\Projects\SpineScan\data\test.jpg"
+    preprocessed = preprocess_image(url)  # Preprocess the image
+    ocr_data = ocr(preprocessed)
     music_res = group_text_by_rows(ocr_data, threshold=35)
     print(music_res)
     prompt_template = """
