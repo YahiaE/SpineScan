@@ -1,6 +1,7 @@
 import discogs_client
 from flask import Flask, session, redirect, request
 import os
+import time
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -14,8 +15,8 @@ def login():
     # Creates a Discogs API client instance with your application's credentials.
     d = discogs_client.Client(
         'my_user_agent/1.0',
-        consumer_key=os.getenv("CONSUMER_KEY"),  
-        consumer_secret=os.getenv("CONSUMER_SECRET") 
+        consumer_key=os.getenv("CONSUMER_KEY"), # Identifies your app to the Discogs API (like a public app ID).
+        consumer_secret=os.getenv("CONSUMER_SECRET") # Authenticates your app (like a password) and proves the request comes from you.
     )
         
     # request_token, request_secret: temporary tokens that represents your application's request to access the user's Discogs account.
@@ -34,7 +35,7 @@ def login():
 
 @app.route("/callback")  # Endpoint to handle the callback from Discogs after user authorization
 def callback():
-    oauth_verifier = request.args.get("oauth_verifier") # The verifier code returned by Discogs after user authorization.
+    oauth_verifier = request.args.get("oauth_verifier") # The verifier code returned by Discogs after user authorization. Acts as proof that the user has authorized your application to access their account.
     request_token = session.get("request_token")
     request_token_secret = session.get("request_token_secret")
 
@@ -66,8 +67,19 @@ def callback():
 
     d.set_token(access_token, access_token_secret)
     user = d.identity()
-    # print("User logged in:", user.username)
-    return f"Logged in as {user.username}. You can now close this window."
+
+    collection = []
+    for item in user.collection_folders[0].releases:
+        release = d.release(item.id)  # Only one API call per item
+        artist = release.artists[0].name if release.artists else "Unknown Artist"
+        title = release.title
+        collection.append(f"{artist} - {title}")
+        time.sleep(0.5)  # Pause to avoid hitting the API rate limit
+
+    print(collection)
+ 
+
+    return "Completed login and retrieved user collection."
 
 
 if __name__ == "__main__":
