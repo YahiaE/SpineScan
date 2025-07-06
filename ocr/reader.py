@@ -93,8 +93,8 @@ Input:
 """
     
     prompt = prompt_template.format(list_input=music_res)
-    result = generateList(prompt)
-    print(result.output[0].content[0].text)
+    result = (generateList(prompt).output[0].content[0].text).split("\n")
+    print(result)
 
 def group_text_by_rows(ocr_results, threshold=35):
     rows = []
