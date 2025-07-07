@@ -77,8 +77,10 @@ def callback():
 
     return "Completed login and retrieved user collection."
 
-def normalize_key(text):
-    return re.sub(r'\W+', '', text).lower()
+# removes all non-alphanumeric characters and converts to lowercase
+# makes it easier to compare and search for albums if ocr results have different formatting
+def normalize_key(text): 
+    return re.sub(r'\W+', '', text).lower() # Res - How I Do => reshowido
 
 def add_ocr_results_to_collection(collection, release_ids, d):
     albums_from_ocr = ocr_main()
