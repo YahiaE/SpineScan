@@ -7,7 +7,7 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 load_dotenv()
-from preprocessing import preprocess_image
+from .preprocessing import preprocess_image
 from azure.cognitiveservices.vision.computervision import ComputerVisionClient
 from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
 from azure.cognitiveservices.vision.computervision.models import VisualFeatureTypes
@@ -24,7 +24,7 @@ def main():
     preprocessed = preprocess_image(url)  # Preprocess the image
     ocr_data = ocr(preprocessed)
     music_res = group_text_by_rows(ocr_data, threshold=35)
-    print(music_res)
+    # print(music_res)
     prompt_template = """
 Objective
 Process raw OCR text lines from CD spines and covers to produce accurate, standardized "Artist - Album" format. The process should handle data cleaning, fuzzy error correction, disambiguation, and verification against a trusted music database, applicable to any artist or album.
@@ -93,8 +93,8 @@ Input:
 """
     
     prompt = prompt_template.format(list_input=music_res)
-    result = (generateList(prompt).output[0].content[0].text).split("\n")
-    print(result)
+    result = [item.strip() for item in (generateList(prompt).output[0].content[0].text).split("\n")]
+    return result
 
 def group_text_by_rows(ocr_results, threshold=35):
     rows = []

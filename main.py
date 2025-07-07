@@ -1,5 +1,7 @@
 import discogs_client
 from flask import Flask, session, redirect, request
+from ocr.reader import main as ocr_main
+from ocr.preprocessing import preprocess_image
 import os
 import time
 from dotenv import load_dotenv
@@ -68,15 +70,38 @@ def callback():
     d.set_token(access_token, access_token_secret)
     user = d.identity()
 
-    collection = []
+
+    collection = set()
+    release_ids = set()  
     for item in user.collection_folders[0].releases:
         release = d.release(item.id)  # Only one API call per item
         artist = release.artists[0].name if release.artists else "Unknown Artist"
         title = release.title
-        collection.append(f"{artist} - {title}")
+        collection.add(f"{artist} - {title}")
+        release_ids.add(release.id)  # Collect release IDs to avoid duplicates
         time.sleep(0.5)  # Pause to avoid hitting the API rate limit
+    print("User's collection before adding OCR results: ", collection, f"{len(collection)} items")
+    print("Release IDs from user's collection before: ", release_ids, f"{len(release_ids)} items")
 
-    print(collection)
+    # OCR ran on sample image
+    albums_from_ocr = ocr_main()
+
+    for album in albums_from_ocr:
+        inCollection = album in collection
+        release = d.search(album, type="release").page(0)[0] if not inCollection else None
+        if not inCollection and release:
+            artist = release.artists[0].name if release.artists else "Unknown Artist"
+            title = release.title
+            if f"{artist} - {title}" not in collection:
+                collection.add(f"{artist} - {title}")
+                release_ids.add(release.id)
+        time.sleep(0.5)  # Pause to avoid hitting the API rate limit
+    
+    print("OCR results: ", albums_from_ocr)
+    print("User's collection after adding OCR results: ", collection, f"{len(collection)} items")
+    print("Release IDs from user's collection after: ", release_ids, f"{len(release_ids)} items")
+
+
  
 
     return "Completed login and retrieved user collection."
