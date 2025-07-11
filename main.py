@@ -1,6 +1,9 @@
 import discogs_client
 from flask import Flask, session, redirect, request
+from ocr.reader import main as ocr_main
+from ocr.preprocessing import preprocess_image
 import os
+import re
 import time
 from dotenv import load_dotenv
 load_dotenv()
@@ -68,19 +71,72 @@ def callback():
     d.set_token(access_token, access_token_secret)
     user = d.identity()
 
-    collection = []
-    for item in user.collection_folders[0].releases:
-        release = d.release(item.id)  # Only one API call per item
-        artist = release.artists[0].name if release.artists else "Unknown Artist"
-        title = release.title
-        collection.append(f"{artist} - {title}")
-        time.sleep(0.5)  # Pause to avoid hitting the API rate limit
-
-    print(collection)
+    collection, release_ids = get_collection(user, d)  # Get user's collection and release IDs
+    collection, release_ids = add_ocr_results_to_collection(collection, release_ids, d)  # Add OCR results to the collection
  
 
     return "Completed login and retrieved user collection."
 
+# removes all non-alphanumeric characters and converts to lowercase
+# makes it easier to compare and search for albums if ocr results have different formatting
+def normalize_key(text): 
+    return re.sub(r'\W+', '', text).lower() # Res - How I Do => reshowido
+
+def add_ocr_results_to_collection(collection, release_ids, d):
+    albums_from_ocr = ocr_main()
+    search_cache = {}
+    normalized_collection = {normalize_key(entry) for entry in collection}
+
+    for album in albums_from_ocr:
+        normalized_album = normalize_key(album)
+
+        if normalized_album in normalized_collection:
+            continue  # Already in collection, skip
+
+        # Try to get from cache
+        if normalized_album in search_cache:
+            release = search_cache[normalized_album]
+        else:
+            result = d.search(album, type="release").page(0)
+            release = result[0] if result else None
+            search_cache[normalized_album] = release  # Cache it even if None
+            time.sleep(0.5)  # Respect API rate limits
+
+        # If a valid release was found
+        if release:
+            artist = release.artists[0].name if release.artists else "Unknown Artist"
+            title = release.title
+            entry = f"{artist} - {title}"
+            norm_entry = normalize_key(entry)
+
+        # If the normalized entry is not already in the collection
+        if norm_entry not in normalized_collection:
+            collection.add(entry)
+            release_ids.add(release.id)
+            normalized_collection.add(norm_entry)
+
+
+    print("OCR results: ", albums_from_ocr)
+    print("User's collection after adding OCR results: ", collection, f"{len(collection)} items")
+    print("Release IDs from user's collection after: ", release_ids, f"{len(release_ids)} items")
+
+    return collection, release_ids
+
+def get_collection(user,d):
+    collection = set() # User's entire collection
+    release_ids = set()  # Set to store unique release IDs from the collection
+
+    for item in user.collection_folders[0].releases:
+        release = d.release(item.id)  # Only one API call per item
+        artist = release.artists[0].name if release.artists else "Unknown Artist"
+        title = release.title
+        collection.add(f"{artist} - {title}")
+        release_ids.add(release.id)  # Collect release IDs to avoid duplicates
+        time.sleep(0.5)  # Pause to avoid hitting the API rate limit
+
+    print("User's collection before adding OCR results: ", collection, f"{len(collection)} items")
+    print("Release IDs from user's collection before: ", release_ids, f"{len(release_ids)} items")
+    return collection, release_ids
 
 if __name__ == "__main__":
     app.run(debug=True)  # Run the application in debug mode
