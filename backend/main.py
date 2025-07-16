@@ -73,7 +73,7 @@ def callback():
 
     collection, release_ids = get_collection(user, d)  # Get user's collection and release IDs
     collection, release_ids = add_ocr_results_to_collection(collection, release_ids, d)  # Add OCR results to the collection
- 
+    
 
     return "Completed login and retrieved user collection."
 
