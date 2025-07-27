@@ -20,7 +20,7 @@ import time
 
 
 def main():
-    url = r"D:\Projects\SpineScan\data\test.jpg"
+    url = r"D:\Projects\SpineScan\backend\data\test.jpg"
     preprocessed = preprocess_image(url)  # Preprocess the image
     ocr_data = ocr(preprocessed)
     music_res = group_text_by_rows(ocr_data, threshold=35)

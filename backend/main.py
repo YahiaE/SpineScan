@@ -1,7 +1,8 @@
 import discogs_client
+from discogs_client.exceptions import HTTPError
 from flask import Flask, session, redirect, request
-from ocr.reader import main as ocr_main
-from ocr.preprocessing import preprocess_image
+from ocr_functions.preprocessing import preprocess_image
+from ocr_functions.reader import main as ocr_main
 import os
 import re
 import time
@@ -13,69 +14,55 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY")  # Set a secret key for the Flask session, used for signing cookies and protecting session data.
 # print("Secret key:", app.secret_key)
 
-@app.route("/login") # Endpoint to initiate the login process
-def login():
-    # Creates a Discogs API client instance with your application's credentials.
-    d = discogs_client.Client(
-        'my_user_agent/1.0',
-        consumer_key=os.getenv("CONSUMER_KEY"), # Identifies your app to the Discogs API (like a public app ID).
-        consumer_secret=os.getenv("CONSUMER_SECRET") # Authenticates your app (like a password) and proves the request comes from you.
-    )
-        
-    # request_token, request_secret: temporary tokens that represents your application's request to access the user's Discogs account.
-    # signs the request with your application's credentials to prove that the request came from your app
-    # returns a request token and secret.  
-    request_token, request_token_secret, url = d.get_authorize_url('http://127.0.0.1:5000/callback')
-    print("Request token:", request_token)
-    print("Request token secret:", request_token_secret)
+@app.route("/auth/request_token", methods=["GET"])
+def get_request_token_mobile():
+    try:
+        d = discogs_client.Client(
+            'my_user_agent/1.0',
+            consumer_key=os.getenv("CONSUMER_KEY"),
+            consumer_secret=os.getenv("CONSUMER_SECRET")
+        )
+        request_token, request_token_secret, url = d.get_authorize_url(os.getenv("HOST") + "/callback") 
+        session["request_token"] = request_token
+        session["request_token_secret"] = request_token_secret
 
-    # Save request token & secret in session (so we can use it later in callback)
-    session["request_token"] = request_token
-    session["request_token_secret"] = request_token_secret
+        return {
+            "oauth_token": request_token,
+            "oauth_token_secret": request_token_secret,
+            "authorize_url": url
+        }
+    except HTTPError as e:
+        return {"error": str(e)}, 500
 
-    return redirect(url) # Redirects the user to the Discogs authorization page.
+@app.route("/auth/access_token", methods=["POST"])
+def exchange_access_token_mobile():
+    data = request.get_json()
+    oauth_verifier = data.get("oauth_verifier")
+    oauth_token = data.get("oauth_token")
+    oauth_token_secret = data.get("oauth_token_secret")
 
+    if not oauth_verifier or not oauth_token or not oauth_token_secret:
+        return {"error": "Missing data"}, 400
 
-@app.route("/callback")  # Endpoint to handle the callback from Discogs after user authorization
-def callback():
-    oauth_verifier = request.args.get("oauth_verifier") # The verifier code returned by Discogs after user authorization. Acts as proof that the user has authorized your application to access their account.
-    request_token = session.get("request_token")
-    request_token_secret = session.get("request_token_secret")
+    try:
+        d = discogs_client.Client(
+            'my_user_agent/1.0',
+            consumer_key=os.getenv("CONSUMER_KEY"),
+            consumer_secret=os.getenv("CONSUMER_SECRET")
+        )
 
-    print("Verifier:", oauth_verifier)
-    print("Request token:", request_token)
-    print("Request token secret:", request_token_secret)
+        d.set_token(oauth_token, oauth_token_secret)
+        access_token, access_token_secret = d.get_access_token(oauth_verifier)
 
-    if not oauth_verifier or not request_token or not request_token_secret: # If any of these values are missing, the callback cannot proceed.
-        return "Missing tokens / OAuth verifier", 400
+        session["access_token"] = access_token
+        session["access_token_secret"] = access_token_secret
 
-    # Recreate a Discogs API client instance with your application's credentials.
-    d = discogs_client.Client(
-        'my_user_agent/1.0',
-        consumer_key=os.getenv("CONSUMER_KEY"),  
-        consumer_secret=os.getenv("CONSUMER_SECRET") 
-    )
-
-    # We tell the client to use the request token and secret so Discogs knows this is the same app that started the login process. 
-    # This helps keep the process safe and correct.
-    d.set_token(request_token, request_token_secret) 
-
-    # Now we can get the access token and secret, which are used to make authenticated requests on behalf of the user.
-    access_token, access_token_secret = d.get_access_token(oauth_verifier)
-    session["access_token"] = access_token
-    session["access_token_secret"] = access_token_secret
-
-    print("Access token:", access_token)
-    print("Access token secret:", access_token_secret)
-
-    d.set_token(access_token, access_token_secret)
-    user = d.identity()
-
-    collection, release_ids = get_collection(user, d)  # Get user's collection and release IDs
-    collection, release_ids = add_ocr_results_to_collection(collection, release_ids, d)  # Add OCR results to the collection
-    
-
-    return "Completed login and retrieved user collection."
+        return {
+            "access_token": access_token,
+            "access_token_secret": access_token_secret
+        }
+    except Exception as e:
+        return {"error": str(e)}, 500
 
 # removes all non-alphanumeric characters and converts to lowercase
 # makes it easier to compare and search for albums if ocr results have different formatting
@@ -139,4 +126,4 @@ def get_collection(user,d):
     return collection, release_ids
 
 if __name__ == "__main__":
-    app.run(debug=True)  # Run the application in debug mode
+    app.run(host='0.0.0.0', port=5000, debug=True)  # Run the application in debug mode
