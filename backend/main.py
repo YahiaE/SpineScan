@@ -12,7 +12,19 @@ load_dotenv()
 app = Flask(__name__)
 
 app.secret_key = os.getenv("FLASK_SECRET_KEY")  # Set a secret key for the Flask session, used for signing cookies and protecting session data.
-# print("Secret key:", app.secret_key)
+
+@app.route("/callback", methods=["GET"])
+def callback():
+    oauth_verifier = request.args.get("oauth_verifier")
+    oauth_token = request.args.get("oauth_token")
+
+    if not oauth_verifier or not oauth_token:
+        return "Missing oauth parameters", 400
+    
+    session["oauth_verifier"] = oauth_verifier
+    session["oauth_token"] = oauth_token
+    
+    return redirect(f"spinescan://callback?oauth_token={oauth_token}&oauth_verifier={oauth_verifier}")
 
 @app.route("/auth/request_token", methods=["GET"])
 def get_request_token_mobile():
@@ -22,14 +34,16 @@ def get_request_token_mobile():
             consumer_key=os.getenv("CONSUMER_KEY"),
             consumer_secret=os.getenv("CONSUMER_SECRET")
         )
-        request_token, request_token_secret, url = d.get_authorize_url(os.getenv("HOST") + "/callback") 
+        request_token, request_token_secret, url = d.get_authorize_url("spinescan://callback") 
         session["request_token"] = request_token
         session["request_token_secret"] = request_token_secret
 
+        print(request_token,request_token_secret,url)
         return {
+            "authorize_url": url,
             "oauth_token": request_token,
-            "oauth_token_secret": request_token_secret,
-            "authorize_url": url
+            "oauth_token_secret": request_token_secret
+            
         }
     except HTTPError as e:
         return {"error": str(e)}, 500
@@ -39,7 +53,9 @@ def exchange_access_token_mobile():
     data = request.get_json()
     oauth_verifier = data.get("oauth_verifier")
     oauth_token = data.get("oauth_token")
-    oauth_token_secret = data.get("oauth_token_secret")
+    oauth_token_secret = session.get("request_token_secret")
+    print(oauth_token,oauth_verifier,oauth_token_secret)
+    
 
     if not oauth_verifier or not oauth_token or not oauth_token_secret:
         return {"error": "Missing data"}, 400
@@ -56,6 +72,7 @@ def exchange_access_token_mobile():
 
         session["access_token"] = access_token
         session["access_token_secret"] = access_token_secret
+        print(access_token,access_token_secret)
 
         return {
             "access_token": access_token,
