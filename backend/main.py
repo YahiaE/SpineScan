@@ -18,6 +18,7 @@ from ocr_functions.reader import main as ocr_main
 import os
 import re
 import time
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,7 +46,7 @@ def get_request_token():
             consumer_secret=os.getenv("CONSUMER_SECRET"),
         )
         request_token, request_token_secret, url = d.get_authorize_url(
-            "http://192.168.1.146:5000/auth/callback"
+            "http://10.107.210.61:5000/auth/callback"
         )
         OAUTH_PENDING[request_token] = {
             "request_token_secret": request_token_secret,
@@ -76,13 +77,8 @@ def callback():
     return {"ok": True, "oauth_token": oauth_token}
 
 
-@app.route("/auth/access_token", methods=["POST"])
+@app.route("/auth/access_token", methods=["GET"])
 def exchange_access_token():
-    """Exchange OAuth verifier + request token for Discogs access token.
-
-    Requires session:
-    - request_token_secret
-    """
     oauth_token = session.get("request_token")
     oauth_token_secret = session.get("request_token_secret")
     print(oauth_token, oauth_token_secret)
@@ -102,7 +98,7 @@ def exchange_access_token():
             OAUTH_PENDING[oauth_token]["oauth_verifier"]
         )
 
-        OAUTH_PENDING.pop(oauth_token)
+        
 
         session["access_token"] = access_token
         session["access_token_secret"] = access_token_secret
@@ -115,6 +111,29 @@ def exchange_access_token():
         }
     except Exception as e:
         return {"error": str(e)}, 500
+
+@app.route("/data/albums", methods=["GET"])
+def get_albums():
+    d = discogs_client.Client(
+        "my_user_agent/1.0",
+        consumer_key=os.getenv("CONSUMER_KEY"),
+        consumer_secret=os.getenv("CONSUMER_SECRET"),
+    )
+
+    access_token = session.get("access_token")
+    access_token_secret = session.get("access_token_secret")
+    d.set_token(access_token, access_token_secret)
+
+    user = d.identity()
+
+    albums = []
+    for album in user.collection_folders[0].releases:
+        albums.append({"name": album.release.artists[0].name, "title": album.release.title})
+
+        
+    
+    return json.dumps(albums,indent=4)
+
 
 
 if __name__ == "__main__":
