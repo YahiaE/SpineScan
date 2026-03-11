@@ -19,6 +19,7 @@ import os
 import re
 import time
 import json
+import redis
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,6 +27,7 @@ load_dotenv()
 app = Flask(__name__)
 
 OAUTH_PENDING = {}
+r = redis.Redis(host='localhost', port=6379, decode_responses=True)
 
 app.secret_key = os.getenv(
     "FLASK_SECRET_KEY"
@@ -48,11 +50,13 @@ def get_request_token():
         request_token, request_token_secret, url = d.get_authorize_url(
             "http://10.107.210.61:5000/auth/callback"
         )
-        OAUTH_PENDING[request_token] = {
+
+        r.hset(request_token, mapping = {
             "request_token_secret": request_token_secret,
             "oauth_verifier": None,
             "created_at": time.time(),
-        }
+        } )
+        
 
         session["request_token"] = request_token
         session["request_token_secret"] = request_token_secret
@@ -71,8 +75,8 @@ def get_request_token():
 def callback():
     oauth_token = request.args.get("oauth_token")
     oauth_verifier = request.args.get("oauth_verifier")
-    if oauth_token in OAUTH_PENDING:
-        OAUTH_PENDING[oauth_token]["oauth_verifier"] = oauth_verifier
+    if r.hgetall(oauth_token):
+        r.hgetall(oauth_token)["oauth_verifier"] = oauth_verifier
 
     return {"ok": True, "oauth_token": oauth_token}
 
@@ -83,7 +87,7 @@ def exchange_access_token():
     oauth_token_secret = session.get("request_token_secret")
     print(oauth_token, oauth_token_secret)
 
-    if oauth_token not in OAUTH_PENDING:
+    if not r.hgetall(oauth_token):
         return {"error": "Missing data"}, 400
 
     try:
@@ -95,7 +99,7 @@ def exchange_access_token():
 
         d.set_token(oauth_token, oauth_token_secret)
         access_token, access_token_secret = d.get_access_token(
-            OAUTH_PENDING[oauth_token]["oauth_verifier"]
+           r.hgetall(oauth_token)["oauth_verifier"]
         )
 
         
