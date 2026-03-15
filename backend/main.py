@@ -48,12 +48,14 @@ def get_request_token():
             consumer_secret=os.getenv("CONSUMER_SECRET"),
         )
         request_token, request_token_secret, url = d.get_authorize_url(
-            "http://10.107.210.61:5000/auth/callback"
+            "http://10.173.66.55:5000/auth/callback"
         )
+
+        print(request_token, request_token_secret, url)
 
         r.hset(request_token, mapping = {
             "request_token_secret": request_token_secret,
-            "oauth_verifier": None,
+            "oauth_verifier": "",
             "created_at": time.time(),
         } )
         
@@ -61,7 +63,6 @@ def get_request_token():
         session["request_token"] = request_token
         session["request_token_secret"] = request_token_secret
 
-        print(request_token, request_token_secret, url)
         return {
             "authorize_url": url,
             "oauth_token": request_token,
@@ -76,7 +77,7 @@ def callback():
     oauth_token = request.args.get("oauth_token")
     oauth_verifier = request.args.get("oauth_verifier")
     if r.hgetall(oauth_token):
-        r.hgetall(oauth_token)["oauth_verifier"] = oauth_verifier
+        r.hset(oauth_token, "oauth_verifier", oauth_verifier)
 
     return {"ok": True, "oauth_token": oauth_token}
 
@@ -99,7 +100,7 @@ def exchange_access_token():
 
         d.set_token(oauth_token, oauth_token_secret)
         access_token, access_token_secret = d.get_access_token(
-           r.hgetall(oauth_token)["oauth_verifier"]
+           r.hget(oauth_token, "oauth_verifier")
         )
 
         
