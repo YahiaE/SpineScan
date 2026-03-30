@@ -6,6 +6,7 @@ import json
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
+
 load_dotenv()
 from .preprocessing import preprocess_image
 from azure.cognitiveservices.vision.computervision import ComputerVisionClient
@@ -19,8 +20,7 @@ import sys
 import time
 
 
-def main():
-    url = r"D:\Projects\SpineScan\backend\data\test.jpg"
+def main(url):
     preprocessed = preprocess_image(url)  # Preprocess the image
     ocr_data = ocr(preprocessed)
     music_res = group_text_by_rows(ocr_data, threshold=35)
@@ -91,10 +91,14 @@ Do not include any intermediate logs, scores, or metadata — just the final cle
 Input:
 {list_input}
 """
-    
+
     prompt = prompt_template.format(list_input=music_res)
-    result = [item.strip() for item in (generateList(prompt).output[0].content[0].text).split("\n")]
+    result = [
+        item.strip()
+        for item in (generateList(prompt).output[0].content[0].text).split("\n")
+    ]
     return result
+
 
 def group_text_by_rows(ocr_results, threshold=35):
     rows = []
@@ -102,13 +106,19 @@ def group_text_by_rows(ocr_results, threshold=35):
     for result in ocr_results:
         text = result["text"]
         bounding_box = result["bounding_box"]
-        avg_y = sum(bounding_box[1::2]) / 4  # Calculate the average vertical position of the bounding box
+        avg_y = (
+            sum(bounding_box[1::2]) / 4
+        )  # Calculate the average vertical position of the bounding box
 
         # Check if the text belongs to an existing row
         for row in rows:
-            if abs(avg_y - row["avg_y"]) <= threshold:  # Compare vertical position with existing rows
+            if (
+                abs(avg_y - row["avg_y"]) <= threshold
+            ):  # Compare vertical position with existing rows
                 row["texts"].append(text)
-                row["avg_y"] = (row["avg_y"] * len(row["texts"]) + avg_y) / (len(row["texts"]) + 1)  # Update average y
+                row["avg_y"] = (row["avg_y"] * len(row["texts"]) + avg_y) / (
+                    len(row["texts"]) + 1
+                )  # Update average y
                 break
         else:
             # Create a new row if no existing row matches
@@ -118,17 +128,14 @@ def group_text_by_rows(ocr_results, threshold=35):
     result = "\n".join([", ".join(row["texts"]) for row in rows])
     return result
 
+
 def generateList(prompt):
     load_dotenv()
     client = OpenAI()
     OpenAI.api_key = os.getenv("OPENAI_API_KEY")
-    response = client.responses.create(
-    model="gpt-4.1",
-    input=prompt
-    )
+    response = client.responses.create(model="gpt-4.1", input=prompt)
 
     return response
-
 
 
 def ocr(url, timeout=60):
@@ -149,15 +156,19 @@ def ocr(url, timeout=60):
     results = []
     subscription_key = os.getenv("VISION_KEY")
     endpoint = os.getenv("VISION_ENDPOINT")
-    
+
     if not subscription_key or not endpoint:
-        raise ValueError("VISION_KEY or VISION_ENDPOINT is not set in the environment variables.")
-    
+        raise ValueError(
+            "VISION_KEY or VISION_ENDPOINT is not set in the environment variables."
+        )
+
     if not os.path.exists(url):
         raise FileNotFoundError(f"Image file not found: {url}")
-    
-    computervision_client = ComputerVisionClient(endpoint, CognitiveServicesCredentials(subscription_key))
-    
+
+    computervision_client = ComputerVisionClient(
+        endpoint, CognitiveServicesCredentials(subscription_key)
+    )
+
     with open(url, "rb") as image_stream:
         read_response = computervision_client.read_in_stream(image_stream, raw=True)
 
@@ -168,7 +179,7 @@ def ocr(url, timeout=60):
 
     while True:
         read_result = computervision_client.get_read_result(operation_id)
-        if read_result.status not in ['notStarted', 'running']:
+        if read_result.status not in ["notStarted", "running"]:
             break
         if time.time() - start_time > timeout:  # Check if the timeout limit is exceeded
             raise TimeoutError("OCR operation timed out.")
@@ -177,19 +188,12 @@ def ocr(url, timeout=60):
     if read_result.status == OperationStatusCodes.succeeded:
         for text_result in read_result.analyze_result.read_results:
             for line in text_result.lines:
-                results.append({
-                    "text": line.text,
-                    "bounding_box": line.bounding_box
-                })
+                results.append({"text": line.text, "bounding_box": line.bounding_box})
     else:
         raise Exception(f"OCR operation failed with status: {read_result.status}")
-    
+
     return results
 
 
-if __name__ == "__main__":
-    main()
-
-
-
-
+# if __name__ == "__main__":
+#     main()

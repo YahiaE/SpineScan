@@ -13,6 +13,8 @@ interface AppState {
   setScannedAlbums: (albums: Album[]) => void;
   scanHistory: { date: string; count: number }[];
   addHistory: (count: number) => void;
+  capturedImage: string | null;
+  setCapturedImage: (url: string | null) => void;
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -20,18 +22,31 @@ const AppContext = createContext<AppState | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [isConnected, setConnected] = useState(false);
   const [scannedAlbums, setScannedAlbums] = useState<Album[]>([]);
-  const [scanHistory, setScanHistory] = useState<{ date: string; count: number }[]>([]);
+  const [scanHistory, setScanHistory] = useState<
+    { date: string; count: number }[]
+  >([]);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
   const addHistory = (count: number) => {
-    setScanHistory(prev => [{ date: new Date().toISOString(), count }, ...prev]);
+    setScanHistory((prev) => [
+      { date: new Date().toISOString(), count },
+      ...prev,
+    ]);
   };
 
   return (
-    <AppContext.Provider value={{
-      isConnected, setConnected,
-      scannedAlbums, setScannedAlbums,
-      scanHistory, addHistory
-    }}>
+    <AppContext.Provider
+      value={{
+        isConnected,
+        setConnected,
+        scannedAlbums,
+        setScannedAlbums,
+        scanHistory,
+        addHistory,
+        capturedImage,
+        setCapturedImage,
+      }}
+    >
       {children}
     </AppContext.Provider>
   );
