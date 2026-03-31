@@ -4,7 +4,14 @@ import { Disc3, Check, ArrowLeft } from "lucide-react";
 
 export function Confirm() {
   const navigate = useNavigate();
-  const { scannedAlbums } = useAppContext();
+  const { scannedAlbums, collectionFolders, selectedCollectionId } =
+    useAppContext();
+  const selectedFolder = collectionFolders.find(
+    (folder) => folder.id === selectedCollectionId,
+  );
+  const validAlbums = scannedAlbums.filter(
+    (album) => album.validation?.status === "valid",
+  );
 
   return (
     <div className="flex flex-col h-full bg-neutral-950 p-6 overflow-y-auto">
@@ -14,18 +21,27 @@ export function Confirm() {
         </div>
         <h1 className="text-3xl font-bold text-white mb-4">Ready to Import?</h1>
         <p className="text-neutral-400 text-lg max-w-xs">
-          Import {scannedAlbums.length} albums to your Discogs collection?
+          Import {validAlbums.length} albums to{" "}
+          {selectedFolder?.name ?? "your collection"}?
         </p>
 
         <div className="mt-8 w-full max-w-xs bg-neutral-900 rounded-xl border border-neutral-800 p-4">
-          <p className="text-sm text-neutral-500 text-left mb-2 uppercase tracking-wider font-semibold">Preview</p>
+          <p className="text-sm text-neutral-500 text-left mb-2 uppercase tracking-wider font-semibold">
+            Preview
+          </p>
           <div className="space-y-2 text-left">
-            {scannedAlbums.slice(0, 3).map(a => {
+            {validAlbums.slice(0, 3).map((a) => {
               if (!a) return null;
-              return <p key={a.id} className="text-white text-sm truncate">{a.artist} — {a.title}</p>;
+              return (
+                <p key={a.id} className="text-white text-sm truncate">
+                  {a.artist} — {a.title}
+                </p>
+              );
             })}
-            {scannedAlbums.length > 3 && (
-              <p className="text-neutral-500 text-sm italic">...and {scannedAlbums.length - 3} more</p>
+            {validAlbums.length > 3 && (
+              <p className="text-neutral-500 text-sm italic">
+                ...and {validAlbums.length - 3} more
+              </p>
             )}
           </div>
         </div>
@@ -34,6 +50,7 @@ export function Confirm() {
       <div className="space-y-3 mt-auto shrink-0 pb-4">
         <button
           onClick={() => navigate("/importing")}
+          disabled={validAlbums.length === 0 || !selectedFolder}
           className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-4 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors"
         >
           <Check className="w-5 h-5" /> Confirm Import

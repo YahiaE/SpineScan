@@ -5,15 +5,29 @@ import { useAppContext } from "../store";
 
 export function Success() {
   const navigate = useNavigate();
-  const { setScannedAlbums } = useAppContext();
+  const {
+    setScannedAlbums,
+    collectionFolders,
+    selectedCollectionId,
+    setSelectedCollectionId,
+    lastImportSummary,
+    setLastImportSummary,
+  } = useAppContext();
+
+  const selectedFolder = collectionFolders.find(
+    (folder) => folder.id === selectedCollectionId,
+  );
 
   const handleScanMore = () => {
     setScannedAlbums([]);
+    setLastImportSummary(null);
     navigate("/scan");
   };
 
   const handleHome = () => {
     setScannedAlbums([]);
+    setSelectedCollectionId(null);
+    setLastImportSummary(null);
     navigate("/home");
   };
 
@@ -30,8 +44,16 @@ export function Success() {
 
       <h1 className="text-3xl font-bold text-white mb-3">Success!</h1>
       <p className="text-neutral-400 text-lg mb-12 max-w-xs">
-        Albums successfully added to your Discogs collection.
+        Added {lastImportSummary?.addedCount ?? 0} albums to{" "}
+        {selectedFolder?.name ?? "your Discogs collection"}.
       </p>
+      {(lastImportSummary?.skippedCount ?? 0) > 0 && (
+        <p className="text-amber-300 text-sm mb-8 max-w-xs">
+          Skipped {lastImportSummary?.skippedCount ?? 0} duplicate
+          {(lastImportSummary?.skippedCount ?? 0) === 1 ? " entry" : " entries"}
+          .
+        </p>
+      )}
 
       <div className="w-full space-y-4">
         <button

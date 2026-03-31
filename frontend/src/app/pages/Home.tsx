@@ -25,9 +25,19 @@ export function Home() {
       </button>
 
       <div className="flex-1 pb-6">
-        <div className="flex items-center gap-2 text-neutral-300 mb-4">
-          <History className="w-5 h-5" />
-          <h2 className="font-medium">Recent Scans</h2>
+        <div className="flex items-center justify-between gap-2 text-neutral-300 mb-4">
+          <div className="flex items-center gap-2">
+            <History className="w-5 h-5" />
+            <h2 className="font-medium">Recent Scans</h2>
+          </div>
+          {scanHistory.length > 0 && (
+            <button
+              onClick={() => navigate("/history")}
+              className="text-sm text-emerald-400 hover:text-emerald-300 transition-colors"
+            >
+              View all
+            </button>
+          )}
         </div>
 
         {scanHistory.length === 0 ? (
@@ -36,14 +46,25 @@ export function Home() {
           </div>
         ) : (
           <div className="space-y-3">
-            {scanHistory.map((scan, i) => (
-              <div key={i} className="flex items-center justify-between p-4 bg-neutral-900 border border-neutral-800 rounded-xl hover:bg-neutral-800 transition-colors cursor-pointer">
+            {scanHistory.slice(0, 5).map((scan, i) => (
+              <button
+                key={i}
+                onClick={() => navigate("/history")}
+                className="w-full flex items-center justify-between p-4 bg-neutral-900 border border-neutral-800 rounded-xl hover:bg-neutral-800 transition-colors text-left"
+              >
                 <div>
-                  <p className="text-white font-medium">{scan.count} Albums Added</p>
-                  <p className="text-sm text-neutral-500">{formatDistanceToNow(new Date(scan.date), { addSuffix: true })}</p>
+                  <p className="text-white font-medium">
+                    {scan.count} Albums Added
+                  </p>
+                  <p className="text-sm text-neutral-500">
+                    {scan.folderName ? `${scan.folderName} . ` : ""}
+                    {formatDistanceToNow(new Date(scan.date), {
+                      addSuffix: true,
+                    })}
+                  </p>
                 </div>
                 <ChevronRight className="w-5 h-5 text-neutral-600" />
-              </div>
+              </button>
             ))}
           </div>
         )}
