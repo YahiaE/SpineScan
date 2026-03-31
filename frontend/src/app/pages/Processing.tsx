@@ -4,28 +4,21 @@ import { ScanSearch, AlertCircle } from "lucide-react";
 import { motion } from "motion/react";
 import { useAppContext } from "../store";
 
-const API_BASE = "http://192.168.1.146:5000";
+const API_BASE = "/api";
 
 export function Processing() {
   const navigate = useNavigate();
-  const { capturedImage, setScannedAlbums } = useAppContext();
+  const { setScannedAlbums } = useAppContext();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!capturedImage) {
-      setError("No image found. Please go back and take a photo.");
-      return;
-    }
-
     let cancelled = false;
 
     const run = async () => {
       try {
-        const res = await fetch(`${API_BASE}/data/scan`, {
-          method: "POST",
+        const res = await fetch(`${API_BASE}/process/latest`, {
+          method: "GET",
           credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: capturedImage }),
         });
 
         if (cancelled) return;
@@ -35,9 +28,10 @@ export function Processing() {
           throw new Error(payload?.error ?? `Server error ${res.status}`);
         }
 
-        const { albums } = await res.json();
+        const { result } = await res.json();
 
-        const parsed = (albums as string[])
+        const parsed = (result as string)
+          .split("\n")
           .filter((entry) => entry.includes(" - "))
           .map((entry, i) => {
             const sep = entry.indexOf(" - ");
@@ -45,6 +39,7 @@ export function Processing() {
               id: String(i + 1),
               artist: entry.slice(0, sep).trim(),
               title: entry.slice(sep + 3).trim(),
+              validation: { status: "pending" as const },
             };
           });
 
@@ -61,7 +56,7 @@ export function Processing() {
     return () => {
       cancelled = true;
     };
-  }, [capturedImage, navigate, setScannedAlbums]);
+  }, [navigate, setScannedAlbums]);
 
   if (error) {
     return (

@@ -4,7 +4,7 @@ import { useAppContext } from "../store";
 import { motion } from "motion/react";
 import { useState } from "react";
 
-const API_BASE = "http://192.168.1.146:5000";
+const API_BASE = "/api";
 const EXCHANGE_RETRY_COUNT = 8;
 const EXCHANGE_RETRY_DELAY_MS = 800;
 

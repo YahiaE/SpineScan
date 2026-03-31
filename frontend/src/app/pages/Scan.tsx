@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import { X, Check, CameraOff } from "lucide-react";
 import { useAppContext } from "../store";
 
-const API_BASE = "http://192.168.1.146:5000";
+const API_BASE = "/api";
 
 export function Scan() {
   const navigate = useNavigate();
