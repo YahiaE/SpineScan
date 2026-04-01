@@ -20,7 +20,7 @@ type FolderResponse = {
 type ValidationResponse = {
   validations: Array<{
     id: string;
-    status: "valid" | "invalid";
+    status: "pending" | "valid" | "invalid";
     message?: string;
     release_id?: number;
     matched_artist?: string;
@@ -45,6 +45,68 @@ export function Review() {
   const [folderError, setFolderError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [validating, setValidating] = useState(false);
+
+  const applyValidationPayload = (payload: ValidationResponse) => {
+    const validationMap = new Map(
+      payload.validations.map((item) => [item.id, item]),
+    );
+
+    setScannedAlbums((currentAlbums) =>
+      currentAlbums.map((album) => {
+        const validation = validationMap.get(album.id);
+        if (!validation) return album;
+
+        return {
+          ...album,
+          validation: {
+            status: validation.status,
+            message: validation.message,
+            releaseId: validation.release_id,
+            matchedArtist: validation.matched_artist,
+            matchedTitle: validation.matched_title,
+          },
+        };
+      }),
+    );
+  };
+
+  const requestValidation = async (
+    albumsToValidate: Array<{ id: string; artist: string; title: string }>,
+    options?: { background?: boolean },
+  ) => {
+    if (albumsToValidate.length === 0) return;
+
+    const isBackground = options?.background ?? false;
+    if (!isBackground) {
+      setValidating(true);
+      setValidationError(null);
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/discogs/validate`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries: albumsToValidate }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.error ?? "Validation failed");
+      }
+
+      const payload = (await res.json()) as ValidationResponse;
+      applyValidationPayload(payload);
+    } catch (error) {
+      setValidationError(
+        error instanceof Error ? error.message : "Validation failed",
+      );
+    } finally {
+      if (!isBackground) {
+        setValidating(false);
+      }
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -140,58 +202,41 @@ export function Review() {
   const validateAlbums = async () => {
     if (scannedAlbums.length === 0) return;
 
-    setValidating(true);
-    setValidationError(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/discogs/validate`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          entries: scannedAlbums.map((album) => ({
-            id: album.id,
-            artist: album.artist,
-            title: album.title,
-          })),
-        }),
-      });
-
-      if (!res.ok) {
-        const payload = await res.json().catch(() => null);
-        throw new Error(payload?.error ?? "Validation failed");
-      }
-
-      const payload = (await res.json()) as ValidationResponse;
-      const validationMap = new Map(
-        payload.validations.map((item) => [item.id, item]),
-      );
-
-      setScannedAlbums(
-        scannedAlbums.map((album) => {
-          const validation = validationMap.get(album.id);
-          if (!validation) return album;
-
-          return {
-            ...album,
-            validation: {
-              status: validation.status,
-              message: validation.message,
-              releaseId: validation.release_id,
-              matchedArtist: validation.matched_artist,
-              matchedTitle: validation.matched_title,
-            },
-          };
-        }),
-      );
-    } catch (error) {
-      setValidationError(
-        error instanceof Error ? error.message : "Validation failed",
-      );
-    } finally {
-      setValidating(false);
-    }
+    await requestValidation(
+      scannedAlbums.map((album) => ({
+        id: album.id,
+        artist: album.artist,
+        title: album.title,
+      })),
+    );
   };
+
+  useEffect(() => {
+    const queuedAlbums = scannedAlbums.filter(
+      (album) =>
+        album.validation?.status === "pending" &&
+        Boolean(album.validation.message),
+    );
+
+    if (queuedAlbums.length === 0 || validating) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void requestValidation(
+        queuedAlbums.map((album) => ({
+          id: album.id,
+          artist: album.artist,
+          title: album.title,
+        })),
+        { background: true },
+      );
+    }, 2500);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [scannedAlbums, validating]);
 
   const removeInvalid = () => {
     setScannedAlbums(
@@ -305,7 +350,7 @@ export function Review() {
                 ? `${album.validation?.matchedArtist ?? album.artist} - ${album.validation?.matchedTitle ?? album.title}`
                 : validationStatus === "invalid"
                   ? "No reliable Discogs match"
-                  : "Validate this entry before importing");
+                  : "Waiting for Discogs lookup");
 
             return (
               <motion.div
