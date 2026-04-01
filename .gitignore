@@ -5,6 +5,10 @@ __pycache__/
 # Backend generated images
 backend/data/tmp*.jpg
 backend/preprocessed_image.jpg
+backend/data/*/
+backend/node_modules/
+backend/package-lock.json
+backend/package.json
 
 # Frontend build/deps
 frontend/node_modules/
