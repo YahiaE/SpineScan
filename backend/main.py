@@ -14,13 +14,25 @@ Environment variables used:
 import os
 import time
 import tempfile
+import json
+import hashlib
+import unicodedata
 import redis
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import discogs_client
 from dotenv import load_dotenv
 from discogs_client.exceptions import HTTPError
 from flask import Flask, session, request, jsonify
 from flask_cors import CORS
+from rq import Queue, Worker
+from rq.registry import (
+    DeferredJobRegistry,
+    FailedJobRegistry,
+    FinishedJobRegistry,
+    StartedJobRegistry,
+)
+from supabase import create_client, Client
 from ocr_functions.reader import main as ocr_main
 from ocr_functions.process_image import main as process_image_main
 
@@ -28,13 +40,25 @@ load_dotenv()  # Must run before any project imports that read env vars
 
 app = Flask(__name__)
 
+# Supabase is the durable source of truth for album lookups.
+supabase: Client = create_client(
+    os.environ.get("SUPABASE_URL"),
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    or os.environ.get("SUPABASE_PUBLISHABLE_KEY"),
+)
+
 CORS(
     app,
     supports_credentials=True,
     origins=["http://localhost:5173", "http://192.168.1.146:5173"],
 )
 
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
+# Redis is used for fast cache reads and short-lived workflow state.
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+lookup_queue = Queue(os.getenv("DISCOGS_LOOKUP_QUEUE", "discogs-lookups"), connection=r)
 
 app.secret_key = os.getenv(
     "FLASK_SECRET_KEY"
@@ -52,6 +76,22 @@ DISCOGS_RATE_WINDOW_SECONDS = 60
 DISCOGS_AUTH_REQUEST_LIMIT = int(os.getenv("DISCOGS_AUTH_RPM", "50"))
 DISCOGS_UNAUTH_REQUEST_LIMIT = int(os.getenv("DISCOGS_UNAUTH_RPM", "20"))
 DISCOGS_MAX_RETRIES = int(os.getenv("DISCOGS_MAX_RETRIES", "3"))
+ALBUM_LOOKUP_CACHE_TTL_SECONDS = int(
+    os.getenv("ALBUM_LOOKUP_CACHE_TTL_SECONDS", str(60 * 60 * 24 * 14))
+)
+ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS = int(
+    os.getenv("ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS", str(60 * 60 * 6))
+)
+ALBUM_LOOKUP_PENDING_TTL_SECONDS = int(
+    os.getenv("ALBUM_LOOKUP_PENDING_TTL_SECONDS", "300")
+)
+DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS = int(
+    os.getenv("DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS", "180")
+)
+IMPORT_IDEMPOTENCY_TTL_SECONDS = int(os.getenv("IMPORT_IDEMPOTENCY_TTL_SECONDS", "180"))
+ALBUM_LOOKUP_CACHE_VERSION = os.getenv("ALBUM_LOOKUP_CACHE_VERSION", "v2")
+# RQ workers must import jobs by module path, not from a running __main__ script.
+DISCOGS_LOOKUP_JOB_FUNC = "main.run_album_lookup_job"
 
 
 # Mark session as permanent
@@ -88,16 +128,43 @@ def get_discogs_client():
     if not access_token or not access_token_secret:
         raise ValueError("User not authenticated")
 
-    client = discogs_client.Client(
-        "my_user_agent/1.0",
-        consumer_key=os.getenv("CONSUMER_KEY"),
-        consumer_secret=os.getenv("CONSUMER_SECRET"),
-    )
+    client = create_discogs_oauth_client()
     client.set_token(access_token, access_token_secret)
     return client
 
 
+def get_public_discogs_client():
+    """Create a Discogs client for shared public metadata lookups."""
+    return create_discogs_oauth_client()
+
+
+def get_discogs_consumer_credentials():
+    """Load Discogs app credentials from env and fail fast if missing."""
+    consumer_key = os.getenv("CONSUMER_KEY")
+    consumer_secret = os.getenv("CONSUMER_SECRET")
+
+    if not consumer_key or not consumer_secret:
+        raise RuntimeError(
+            "Discogs consumer credentials are not configured. "
+            "Set CONSUMER_KEY and CONSUMER_SECRET in backend env."
+        )
+
+    return consumer_key, consumer_secret
+
+
+def create_discogs_oauth_client():
+    """Create a Discogs client backed by OAuth fetcher methods."""
+    consumer_key, consumer_secret = get_discogs_consumer_credentials()
+
+    return discogs_client.Client(
+        "my_user_agent/1.0",
+        consumer_key=consumer_key,
+        consumer_secret=consumer_secret,
+    )
+
+
 def get_discogs_rate_bucket_key(authenticated):
+    # Bucket per minute so all app instances share a common rate window.
     bucket_start = int(time.time() // DISCOGS_RATE_WINDOW_SECONDS)
     bucket_name = "auth" if authenticated else "unauth"
     return f"discogs:rate:{bucket_name}:{bucket_start}"
@@ -110,6 +177,7 @@ def acquire_discogs_rate_limit_slot(authenticated=True):
     )
 
     while True:
+        # INCR gives us an atomic counter for this time bucket.
         bucket_key = get_discogs_rate_bucket_key(authenticated)
         current_count = r.incr(bucket_key)
         if current_count == 1:
@@ -118,6 +186,7 @@ def acquire_discogs_rate_limit_slot(authenticated=True):
         if current_count <= limit:
             return
 
+        # If over limit, roll back this reservation and wait for the next slot.
         r.decr(bucket_key)
         wait_seconds = max(
             0.25,
@@ -145,6 +214,7 @@ def call_discogs(api_call, authenticated=True):
             if attempt == DISCOGS_MAX_RETRIES - 1:
                 raise
 
+            # Exponential backoff on Discogs rate-limit responses.
             time.sleep(min(2**attempt, 8))
 
     if last_error is not None:
@@ -174,9 +244,19 @@ def get_discogs_collection_folders(user):
 
 def normalize_text(value):
     """Normalize strings for tolerant artist/title comparisons."""
-    normalized = "".join(
-        ch.lower() for ch in str(value or "") if ch.isalnum() or ch.isspace()
+    text = str(value or "")
+    # Fold accents (Beyonce/Beyoncé) and unify common smart punctuation.
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = (
+        text.replace("’", "'")
+        .replace("`", "'")
+        .replace("‘", "'")
+        .replace("–", "-")
+        .replace("—", "-")
     )
+
+    normalized = "".join(ch.lower() for ch in text if ch.isalnum() or ch.isspace())
     return " ".join(normalized.split()).strip()
 
 
@@ -230,6 +310,30 @@ def parse_release_result(result):
     if not raw_artist and " - " in raw_title:
         raw_artist, raw_title = raw_title.split(" - ", 1)
 
+    # Discogs search titles can include "Artist - Title" even when `artists`
+    # is also populated. Remove duplicated artist prefix for cleaner scoring.
+    if raw_artist and " - " in raw_title:
+        title_prefix, title_remainder = raw_title.split(" - ", 1)
+        normalized_prefix = normalize_text(title_prefix)
+        normalized_artist = normalize_text(raw_artist)
+        normalized_primary_artist = normalize_text(primary_artist_name(raw_artist))
+
+        should_strip_prefix = normalized_prefix in {
+            normalized_artist,
+            normalized_primary_artist,
+        } or (
+            bool(normalized_prefix)
+            and (
+                normalized_prefix in normalized_artist
+                or normalized_prefix in normalized_primary_artist
+                or normalized_artist.startswith(normalized_prefix)
+                or normalized_primary_artist.startswith(normalized_prefix)
+            )
+        )
+
+        if should_strip_prefix:
+            raw_title = title_remainder
+
     return raw_artist.strip(), raw_title.strip()
 
 
@@ -258,6 +362,7 @@ def score_candidate(artist, title, matched_artist, matched_title):
     exact_title = title_base == matched_title_base and bool(title_base)
 
     combined_score = (artist_score * 0.45) + (title_score * 0.55)
+    # Small bonuses reward strong exact matches.
     if exact_artist:
         combined_score += 0.08
     if exact_title:
@@ -272,7 +377,7 @@ def score_candidate(artist, title, matched_artist, matched_title):
     }
 
 
-def iter_release_candidates(client, artist, title):
+def iter_release_candidates(client, artist, title, authenticated=True):
     """Yield unique Discogs release candidates from multiple query strategies."""
     primary_artist = primary_artist_name(artist)
     queries = [
@@ -287,13 +392,17 @@ def iter_release_candidates(client, artist, title):
 
     for query in queries:
         try:
-            search_results = client.search(**query)
+            search_results = call_discogs(
+                lambda query=query: client.search(**query),
+                authenticated=authenticated,
+            )
         except Exception:
             continue
 
         for index, result in enumerate(
-            iter_discogs_paginated_items(search_results, authenticated=True)
+            iter_discogs_paginated_items(search_results, authenticated=authenticated)
         ):
+            # Keep search bounded for predictable response and worker time.
             if index >= 10:
                 break
 
@@ -305,11 +414,13 @@ def iter_release_candidates(client, artist, title):
             yield result
 
 
-def find_best_release_match(client, artist, title):
+def find_best_release_match(client, artist, title, authenticated=True):
     """Find the best matching Discogs release for a scanned album entry."""
     best_match = None
 
-    for result in iter_release_candidates(client, artist, title):
+    for result in iter_release_candidates(
+        client, artist, title, authenticated=authenticated
+    ):
         matched_artist, matched_title = parse_release_result(result)
         scores = score_candidate(artist, title, matched_artist, matched_title)
 
@@ -330,11 +441,20 @@ def find_best_release_match(client, artist, title):
             "message": "No Discogs release match found",
         }
 
-    is_valid = (
-        best_match["release_id"] is not None
-        and best_match["artist_score"] >= 0.58
-        and best_match["title_score"] >= 0.68
-        and best_match["combined_score"] >= 0.72
+    # Final quality gate before accepting a candidate as valid.
+    # Allow an exact title plus strong artist similarity to pass, even when
+    # punctuation/diacritics reduce one raw similarity component.
+    has_strong_exact_title_match = (
+        best_match["exact_title"] and best_match["artist_score"] >= 0.50
+    )
+
+    is_valid = best_match["release_id"] is not None and (
+        (
+            best_match["artist_score"] >= 0.58
+            and best_match["title_score"] >= 0.68
+            and best_match["combined_score"] >= 0.72
+        )
+        or has_strong_exact_title_match
     )
 
     return {
@@ -392,12 +512,361 @@ def get_existing_folder_state(folder):
     return existing_release_ids, existing_album_keys
 
 
+def is_discogs_duplicate_error(error):
+    """Best-effort detection for Discogs duplicate-in-folder API responses."""
+    message = str(getattr(error, "msg", "") or error).lower()
+    status_code = getattr(error, "status_code", None)
+
+    duplicate_markers = [
+        "already in",
+        "already exists",
+        "duplicate",
+        "already added",
+    ]
+
+    if any(marker in message for marker in duplicate_markers):
+        return True
+
+    return status_code in {409, 422} and "already" in message
+
+
+def build_import_request_fingerprint(folder_id, entries):
+    """Build a stable fingerprint for import idempotency."""
+    normalized_entries = []
+    for entry in entries:
+        normalized_entries.append(
+            {
+                "id": str(entry.get("id", "")).strip(),
+                "artist": str(entry.get("artist", "")).strip().lower(),
+                "title": str(entry.get("title", "")).strip().lower(),
+                "release_id": str(entry.get("release_id", "")).strip(),
+            }
+        )
+
+    normalized_entries.sort(
+        key=lambda item: (
+            item["id"],
+            item["artist"],
+            item["title"],
+            item["release_id"],
+        )
+    )
+
+    payload = {
+        "folder_id": int(folder_id),
+        "entries": normalized_entries,
+    }
+    encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded_payload.encode("utf-8")).hexdigest()
+
+
 def album_identity_key(artist, title):
     """Build a normalized key for a logical album regardless of release variant."""
     return (
         normalize_text(primary_artist_name(artist)),
         strip_version_suffix(title),
     )
+
+
+def album_lookup_normalized_key(artist, title):
+    """Serialize the album identity key for Redis and Postgres lookups."""
+    normalized_artist, normalized_title = album_identity_key(artist, title)
+    return f"{normalized_artist}::{normalized_title}"
+
+
+def album_lookup_cache_key(normalized_key):
+    # Cached final result (valid or invalid).
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:{normalized_key}"
+
+
+def album_lookup_pending_key(normalized_key):
+    # Short-lived marker that a background lookup is running.
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:{normalized_key}"
+
+
+def utc_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def build_pending_lookup_result(message="Queued for Discogs lookup"):
+    return {
+        "status": "pending",
+        "message": message,
+    }
+
+
+def build_lookup_result_from_row(row, fallback_artist, fallback_title):
+    """Translate a persisted albums row into the validation response shape."""
+    release_id = row.get("discogs_release_id")
+
+    if release_id is None:
+        return {
+            "status": "invalid",
+            "message": "No Discogs release match found",
+        }
+
+    return {
+        "status": "valid",
+        "message": "Matched Discogs release",
+        "release_id": int(release_id),
+        "matched_artist": row.get("artist") or fallback_artist,
+        "matched_title": row.get("album") or fallback_title,
+    }
+
+
+def read_cached_lookup_result(normalized_key):
+    # Fast path: return immediately on Redis hit.
+    payload = r.get(album_lookup_cache_key(normalized_key))
+    if not payload:
+        return None
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        r.delete(album_lookup_cache_key(normalized_key))
+        return None
+
+
+def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
+    # Keep only the response fields the API needs to return.
+    cacheable_result = {
+        "status": result.get("status"),
+        "message": result.get("message"),
+        "release_id": result.get("release_id"),
+        "matched_artist": result.get("matched_artist"),
+        "matched_title": result.get("matched_title"),
+    }
+
+    effective_ttl = ttl_seconds or ALBUM_LOOKUP_CACHE_TTL_SECONDS
+
+    r.setex(
+        album_lookup_cache_key(normalized_key),
+        effective_ttl,
+        json.dumps(cacheable_result),
+    )
+    r.delete(album_lookup_pending_key(normalized_key))
+    return cacheable_result
+
+
+def fetch_lookup_row_from_postgres(normalized_key):
+    # Durable fallback when Redis does not have the key.
+    try:
+        response = (
+            supabase.table("albums")
+            .select("artist, album, normalized_key, discogs_release_id")
+            .eq("normalized_key", normalized_key)
+            .limit(1)
+            .execute()
+        )
+    except Exception as error:
+        print(f"Failed to read cached album lookup from Supabase: {error}")
+        return None
+
+    rows = getattr(response, "data", None) or []
+    return rows[0] if rows else None
+
+
+def persist_lookup_result(normalized_key, requested_artist, requested_title, match):
+    # Persist valid matches in Postgres, and cache results in Redis.
+    # Invalid results are Redis-only to avoid growing the albums table with NULL release rows.
+    release_id = match.get("release_id") if match.get("status") == "valid" else None
+    stored_artist = (
+        match.get("matched_artist") if release_id is not None else requested_artist
+    ) or requested_artist
+    stored_album = (
+        match.get("matched_title") if release_id is not None else requested_title
+    ) or requested_title
+
+    if release_id is None:
+        try:
+            # If this key already exists from older behavior, clear it.
+            supabase.table("albums").delete().eq(
+                "normalized_key", normalized_key
+            ).execute()
+        except Exception as error:
+            print(f"Failed to delete invalid album lookup from Supabase: {error}")
+
+        return write_cached_lookup_result(
+            normalized_key,
+            {
+                "status": "invalid",
+                "message": match.get("message") or "No Discogs release match found",
+                "release_id": None,
+                "matched_artist": None,
+                "matched_title": None,
+            },
+            ttl_seconds=ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS,
+        )
+
+    try:
+        (
+            supabase.table("albums")
+            .upsert(
+                {
+                    "artist": stored_artist,
+                    "album": stored_album,
+                    "normalized_key": normalized_key,
+                    "discogs_release_id": int(release_id),
+                    "updated_at": utc_timestamp(),
+                },
+                on_conflict="normalized_key",
+            )
+            .execute()
+        )
+    except Exception as error:
+        print(f"Failed to persist album lookup to Supabase: {error}")
+
+    return write_cached_lookup_result(
+        normalized_key,
+        {
+            "status": "valid",
+            "message": match.get("message") or "Matched Discogs release",
+            "release_id": int(release_id),
+            "matched_artist": match.get("matched_artist"),
+            "matched_title": match.get("matched_title"),
+        },
+    )
+
+
+def enqueue_album_lookup_job(artist, title, normalized_key):
+    # Deduplicate jobs by setting a pending key first.
+    pending_key = album_lookup_pending_key(normalized_key)
+    existing_job_id = r.get(pending_key)
+    if existing_job_id:
+        return existing_job_id
+
+    acquired = r.set(
+        pending_key,
+        "queued",
+        nx=True,
+        ex=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+    )
+    if not acquired:
+        return r.get(pending_key)
+
+    try:
+        job = lookup_queue.enqueue(
+            DISCOGS_LOOKUP_JOB_FUNC,
+            artist,
+            title,
+            normalized_key,
+            job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
+            result_ttl=0,
+            failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+        )
+    except Exception:
+        r.delete(pending_key)
+        raise
+
+    r.setex(pending_key, ALBUM_LOOKUP_PENDING_TTL_SECONDS, job.id)
+    return job.id
+
+
+def has_lookup_worker_available():
+    """Return True when at least one worker is listening to the lookup queue."""
+    try:
+        workers = Worker.all(connection=r, queue=lookup_queue)
+        return len(workers) > 0
+    except Exception:
+        return False
+
+
+def count_lookup_pending_markers():
+    """Count Redis pending markers used to deduplicate lookup jobs."""
+    count = 0
+    for _ in r.scan_iter(
+        match=f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:*"
+    ):
+        count += 1
+    return count
+
+
+def get_lookup_queue_stats():
+    """Collect queue and worker telemetry for the validation pipeline."""
+    workers = Worker.all(connection=r, queue=lookup_queue)
+    started_registry = StartedJobRegistry(queue=lookup_queue)
+    failed_registry = FailedJobRegistry(queue=lookup_queue)
+    finished_registry = FinishedJobRegistry(queue=lookup_queue)
+    deferred_registry = DeferredJobRegistry(queue=lookup_queue)
+
+    return {
+        "queue_name": lookup_queue.name,
+        "workers_online": len(workers),
+        "queued_jobs": lookup_queue.count,
+        "started_jobs": len(started_registry),
+        "failed_jobs": len(failed_registry),
+        "finished_jobs": len(finished_registry),
+        "deferred_jobs": len(deferred_registry),
+        "pending_markers": count_lookup_pending_markers(),
+        "sync_fallback_active": len(workers) == 0,
+        "timestamp": utc_timestamp(),
+    }
+
+
+def resolve_release_match(artist, title, enqueue_if_missing=True):
+    """Resolve an album validation from Redis, Postgres, or the async queue."""
+    normalized_key = album_lookup_normalized_key(artist, title)
+    pending_key = album_lookup_pending_key(normalized_key)
+
+    # 1) Redis cache lookup.
+    cached_result = read_cached_lookup_result(normalized_key)
+    if cached_result:
+        return cached_result
+
+    # 2) Postgres lookup.
+    persisted_row = fetch_lookup_row_from_postgres(normalized_key)
+    if persisted_row:
+        return write_cached_lookup_result(
+            normalized_key,
+            build_lookup_result_from_row(persisted_row, artist, title),
+        )
+
+    # 3) If already queued, return pending.
+    if r.get(pending_key):
+        if has_lookup_worker_available():
+            return build_pending_lookup_result()
+        # Clear stale pending markers when no worker is running.
+        r.delete(pending_key)
+
+    # Import flow can request "do not enqueue" and just observe pending state.
+    if not enqueue_if_missing:
+        return build_pending_lookup_result("Validation has not completed yet")
+
+    if not has_lookup_worker_available():
+        # Dev fallback: avoid infinite pending loops when worker is not started.
+        try:
+            return run_album_lookup_job(artist, title, normalized_key)
+        except Exception as error:
+            return {
+                "status": "invalid",
+                "message": f"Discogs lookup failed without worker: {error}",
+            }
+
+    # 4) Queue Discogs lookup.
+    try:
+        enqueue_album_lookup_job(artist, title, normalized_key)
+    except Exception as error:
+        return {
+            "status": "invalid",
+            "message": f"Failed to queue Discogs lookup: {error}",
+        }
+
+    return build_pending_lookup_result()
+
+
+def run_album_lookup_job(artist, title, normalized_key=None):
+    """Worker entrypoint for Discogs album lookups on cache misses."""
+    lookup_key = normalized_key or album_lookup_normalized_key(artist, title)
+
+    try:
+        # Worker uses public Discogs search (no per-user auth context needed).
+        client = get_public_discogs_client()
+        match = find_best_release_match(client, artist, title, authenticated=False)
+        return persist_lookup_result(lookup_key, artist, title, match)
+    except Exception as error:
+        r.delete(album_lookup_pending_key(lookup_key))
+        print(f"Discogs lookup job failed for {artist} - {title}: {error}")
+        raise
 
 
 @app.route("/auth/request_token", methods=["GET"])
@@ -408,11 +877,8 @@ def get_request_token():
     access-token exchange step can complete later.
     """
     try:
-        d = discogs_client.Client(
-            "my_user_agent/1.0",
-            consumer_key=os.getenv("CONSUMER_KEY"),
-            consumer_secret=os.getenv("CONSUMER_SECRET"),
-        )
+        # Start OAuth handshake with Discogs.
+        d = create_discogs_oauth_client()
         request_token, request_token_secret, url = call_discogs(
             lambda: d.get_authorize_url("http://192.168.1.146:5000/auth/callback"),
             authenticated=False,
@@ -423,6 +889,7 @@ def get_request_token():
         r.hset(
             request_token,
             mapping={
+                # Redis holds temporary OAuth state between redirect steps.
                 "request_token_secret": request_token_secret,
                 "oauth_verifier": "",
                 "created_at": time.time(),
@@ -440,6 +907,8 @@ def get_request_token():
             }
         )
     except HTTPError as e:
+        return jsonify({"error": str(e)}), 500
+    except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
 
 
@@ -470,13 +939,10 @@ def exchange_access_token():
     print(oauth_token, oauth_token_secret)
 
     try:
-        d = discogs_client.Client(
-            "my_user_agent/1.0",
-            consumer_key=os.getenv("CONSUMER_KEY"),
-            consumer_secret=os.getenv("CONSUMER_SECRET"),
-        )
+        d = create_discogs_oauth_client()
 
         d.set_token(oauth_token, oauth_token_secret)
+        # Exchange verifier for long-lived access token pair.
         access_token, access_token_secret = call_discogs(
             lambda: d.get_access_token(oauth_verifier),
             authenticated=False,
@@ -546,6 +1012,7 @@ def scan_image():
         return {"error": "File not found"}, 404
 
     try:
+        # OCR output is normalized into artist/title pairs.
         albums = ocr_main(path)
         return {"albums": albums}
     except Exception as e:
@@ -630,6 +1097,16 @@ def get_collection_folders():
     return jsonify({"folders": folders})
 
 
+@app.route("/discogs/worker-status", methods=["GET"])
+def discogs_worker_status():
+    """Expose worker and queue status to debug validation pipeline health."""
+    try:
+        stats = get_lookup_queue_stats()
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/discogs/validate", methods=["POST"])
 def validate_entries():
     body = request.get_json(silent=True)
@@ -639,7 +1116,7 @@ def validate_entries():
         return jsonify({"error": "Missing 'entries' in request body"}), 400
 
     try:
-        d = get_discogs_client()
+        get_discogs_client()
     except ValueError:
         return jsonify({"error": "User not authenticated"}), 401
 
@@ -660,17 +1137,9 @@ def validate_entries():
             )
             continue
 
-        try:
-            match = find_best_release_match(d, artist, title)
-            validations.append({"id": entry_id, **match})
-        except Exception as e:
-            validations.append(
-                {
-                    "id": entry_id,
-                    "status": "invalid",
-                    "message": str(e),
-                }
-            )
+        # Validation is cache-first and async-aware.
+        match = resolve_release_match(artist, title, enqueue_if_missing=True)
+        validations.append({"id": entry_id, **match})
 
     return jsonify({"validations": validations})
 
@@ -692,155 +1161,219 @@ def import_entries():
     except (TypeError, ValueError):
         return jsonify({"error": "'folder_id' must be an integer"}), 400
 
+    import_fingerprint = build_import_request_fingerprint(folder_id, entries)
+    user_scope = session.get("access_token", "anonymous")
+    import_key_suffix = f"{user_scope}:{folder_id}:{import_fingerprint}"
+    import_result_key = f"discogs:import:result:{import_key_suffix}"
+    import_lock_key = f"discogs:import:lock:{import_key_suffix}"
+
+    cached_import_result = r.get(import_result_key)
+    if cached_import_result:
+        try:
+            return jsonify(json.loads(cached_import_result))
+        except json.JSONDecodeError:
+            r.delete(import_result_key)
+
+    lock_acquired = r.set(
+        import_lock_key,
+        "1",
+        nx=True,
+        ex=IMPORT_IDEMPOTENCY_TTL_SECONDS,
+    )
+
+    if not lock_acquired:
+        # Another identical import request is likely in-flight or just completed.
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            cached_import_result = r.get(import_result_key)
+            if cached_import_result:
+                try:
+                    return jsonify(json.loads(cached_import_result))
+                except json.JSONDecodeError:
+                    r.delete(import_result_key)
+                    break
+            time.sleep(0.1)
+
+        return jsonify({"error": "An identical import is already in progress"}), 409
+
     try:
-        d = get_discogs_client()
-        user = get_discogs_identity(d)
-        collection_folders = get_discogs_collection_folders(user)
-    except ValueError:
-        return jsonify({"error": "User not authenticated"}), 401
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        try:
+            d = get_discogs_client()
+            user = get_discogs_identity(d)
+            collection_folders = get_discogs_collection_folders(user)
+        except ValueError:
+            return jsonify({"error": "User not authenticated"}), 401
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
-    target_folder = get_collection_folder(collection_folders, folder_id)
-    if target_folder is None:
-        return jsonify({"error": "Selected collection folder is not available"}), 404
+        target_folder = get_collection_folder(collection_folders, folder_id)
+        if target_folder is None:
+            return jsonify(
+                {"error": "Selected collection folder is not available"}
+            ), 404
 
-    existing_release_ids, existing_album_keys = get_existing_folder_state(target_folder)
-    pending_release_ids = set(existing_release_ids)
-    pending_album_keys = set(existing_album_keys)
-    results = []
+        # Track only this request's additions to avoid stale folder snapshots.
+        pending_release_ids = set()
+        pending_album_keys = set()
+        results = []
 
-    for entry in entries:
-        entry_id = entry.get("id")
-        artist = str(entry.get("artist", "")).strip()
-        title = str(entry.get("title", "")).strip()
-        release_id = entry.get("release_id")
-        entry_album_key = album_identity_key(artist, title)
+        for entry in entries:
+            entry_id = entry.get("id")
+            artist = str(entry.get("artist", "")).strip()
+            title = str(entry.get("title", "")).strip()
+            release_id = entry.get("release_id")
+            entry_album_key = album_identity_key(artist, title)
 
-        if entry_album_key in pending_album_keys:
-            results.append(
-                {
-                    "id": entry_id,
-                    "status": "skipped",
-                    "artist": artist,
-                    "title": title,
-                    "message": "Already exists in this collection or import batch",
-                }
-            )
-            continue
+            if not release_id:
+                # Import does not trigger new Discogs requests; it only consumes ready data.
+                match = resolve_release_match(artist, title, enqueue_if_missing=False)
+                if match["status"] != "valid":
+                    results.append(
+                        {
+                            "id": entry_id,
+                            "status": "rejected",
+                            "artist": artist,
+                            "title": title,
+                            "message": match["message"],
+                        }
+                    )
+                    continue
+                release_id = match["release_id"]
 
-        if not release_id:
-            match = find_best_release_match(d, artist, title)
-            if match["status"] != "valid":
+                matched_album_key = album_identity_key(
+                    match.get("matched_artist", artist),
+                    match.get("matched_title", title),
+                )
+                if matched_album_key in pending_album_keys:
+                    results.append(
+                        {
+                            "id": entry_id,
+                            "status": "skipped",
+                            "artist": artist,
+                            "title": title,
+                            "release_id": release_id,
+                            "message": "A matching album is already in this import batch",
+                        }
+                    )
+                    continue
+                entry_album_key = matched_album_key
+
+            try:
+                normalized_release_id = int(release_id)
+            except (TypeError, ValueError):
                 results.append(
                     {
                         "id": entry_id,
-                        "status": "rejected",
+                        "status": "failed",
                         "artist": artist,
                         "title": title,
-                        "message": match["message"],
+                        "release_id": release_id,
+                        "message": "Invalid Discogs release ID",
                     }
                 )
                 continue
-            release_id = match["release_id"]
 
-            matched_album_key = album_identity_key(
-                match.get("matched_artist", artist),
-                match.get("matched_title", title),
-            )
-            if matched_album_key in pending_album_keys:
+            if normalized_release_id in pending_release_ids:
                 results.append(
                     {
                         "id": entry_id,
                         "status": "skipped",
                         "artist": artist,
                         "title": title,
-                        "release_id": release_id,
-                        "message": "A matching album already exists in this collection or import batch",
+                        "release_id": normalized_release_id,
+                        "message": "Release is already in this import batch",
                     }
                 )
                 continue
-            entry_album_key = matched_album_key
 
-        try:
-            normalized_release_id = int(release_id)
-        except (TypeError, ValueError):
-            results.append(
-                {
-                    "id": entry_id,
-                    "status": "failed",
-                    "artist": artist,
-                    "title": title,
-                    "release_id": release_id,
-                    "message": "Invalid Discogs release ID",
-                }
-            )
-            continue
+            # Secondary logical dedupe after release resolution/normalization.
+            if entry_album_key in pending_album_keys:
+                results.append(
+                    {
+                        "id": entry_id,
+                        "status": "skipped",
+                        "artist": artist,
+                        "title": title,
+                        "release_id": normalized_release_id,
+                        "message": "A matching album is already in this import batch",
+                    }
+                )
+                continue
 
-        if normalized_release_id in pending_release_ids:
-            results.append(
-                {
-                    "id": entry_id,
-                    "status": "skipped",
-                    "artist": artist,
-                    "title": title,
-                    "release_id": normalized_release_id,
-                    "message": "Already exists in this collection or import batch",
-                }
-            )
-            continue
+            try:
+                add_release_to_folder(
+                    d, user.username, folder_id, normalized_release_id
+                )
+                pending_release_ids.add(normalized_release_id)
+                pending_album_keys.add(entry_album_key)
+                results.append(
+                    {
+                        "id": entry_id,
+                        "status": "added",
+                        "artist": artist,
+                        "title": title,
+                        "release_id": normalized_release_id,
+                    }
+                )
+            except HTTPError as e:
+                if is_discogs_duplicate_error(e):
+                    results.append(
+                        {
+                            "id": entry_id,
+                            "status": "skipped",
+                            "artist": artist,
+                            "title": title,
+                            "release_id": normalized_release_id,
+                            "message": "Release already exists in the selected Discogs folder",
+                        }
+                    )
+                    continue
 
-        try:
-            add_release_to_folder(d, user.username, folder_id, normalized_release_id)
-            pending_release_ids.add(normalized_release_id)
-            pending_album_keys.add(entry_album_key)
-            results.append(
-                {
-                    "id": entry_id,
-                    "status": "added",
-                    "artist": artist,
-                    "title": title,
-                    "release_id": normalized_release_id,
-                }
-            )
-        except HTTPError as e:
-            results.append(
-                {
-                    "id": entry_id,
-                    "status": "failed",
-                    "artist": artist,
-                    "title": title,
-                    "release_id": release_id,
-                    "message": e.msg,
-                }
-            )
-        except Exception as e:
-            results.append(
-                {
-                    "id": entry_id,
-                    "status": "failed",
-                    "artist": artist,
-                    "title": title,
-                    "release_id": release_id,
-                    "message": str(e),
-                }
-            )
+                results.append(
+                    {
+                        "id": entry_id,
+                        "status": "failed",
+                        "artist": artist,
+                        "title": title,
+                        "release_id": release_id,
+                        "message": e.msg,
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "id": entry_id,
+                        "status": "failed",
+                        "artist": artist,
+                        "title": title,
+                        "release_id": release_id,
+                        "message": str(e),
+                    }
+                )
 
-    added_count = sum(1 for result in results if result["status"] == "added")
-    skipped_count = sum(1 for result in results if result["status"] == "skipped")
-    failed_count = sum(
-        1 for result in results if result["status"] in {"failed", "rejected"}
-    )
+        added_count = sum(1 for result in results if result["status"] == "added")
+        skipped_count = sum(1 for result in results if result["status"] == "skipped")
+        failed_count = sum(
+            1 for result in results if result["status"] in {"failed", "rejected"}
+        )
 
-    return jsonify(
-        {
+        response_payload = {
             "folder_id": folder_id,
             "results": results,
             "added_count": added_count,
             "skipped_count": skipped_count,
             "failed_count": failed_count,
         }
-    )
+
+        r.setex(
+            import_result_key,
+            IMPORT_IDEMPOTENCY_TTL_SECONDS,
+            json.dumps(response_payload),
+        )
+
+        return jsonify(response_payload)
+    finally:
+        r.delete(import_lock_key)
 
 
 if __name__ == "__main__":
