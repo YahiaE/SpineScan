@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useAppContext } from "../store";
 import { CheckCircle2, Disc3, AlertCircle, SkipForward } from "lucide-react";
@@ -34,12 +34,19 @@ export function Importing() {
     Record<string, ImportResponse["results"][number]>
   >({});
   const [error, setError] = useState<string | null>(null);
+  const hasStartedImportRef = useRef(false);
 
   useEffect(() => {
     if (scannedAlbums.length === 0 || selectedCollectionId === null) {
       navigate("/review");
       return;
     }
+
+    // Prevent duplicate POST /discogs/import calls from effect re-runs.
+    if (hasStartedImportRef.current) {
+      return;
+    }
+    hasStartedImportRef.current = true;
 
     let cancelled = false;
 
