@@ -4,6 +4,8 @@ SpineScan is a CD collection assistant that turns shelf photos into structured a
 
 ## Workflow
 
+<img width="2175" height="1104" alt="mermaid-diagram" src="https://github.com/user-attachments/assets/aa072833-c52f-4b6a-b28c-297c55830471" />
+
 SpineScan runs as a staged pipeline so users can review and correct results before writing to Discogs.
 
 1. Capture and upload
@@ -63,4 +65,5 @@ SpineScan uses a split frontend/backend architecture with async workers for resi
 The project includes a React frontend and a Flask backend with Redis, RQ workers, Supabase, and Discogs OAuth.
 
 
-<img width="2525" height="1175" alt="mermaid-diagram" src="https://github.com/user-attachments/assets/294da624-9690-4e43-8491-e836aa8d0cfc" />
+
+
