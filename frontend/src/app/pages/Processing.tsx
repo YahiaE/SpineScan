@@ -28,12 +28,26 @@ export function Processing() {
           throw new Error(payload?.error ?? `Server error ${res.status}`);
         }
 
-        const { result } = await res.json();
+        const payload = await res.json().catch(() => null);
+        const rawResult = payload?.result;
 
-        const parsed = (result as string)
-          .split("\n")
-          .filter((entry) => entry.includes(" - "))
-          .map((entry, i) => {
+        const resultText =
+          typeof rawResult === "string"
+            ? rawResult
+            : typeof rawResult?.text === "string"
+              ? rawResult.text
+              : "";
+
+        if (!resultText.trim()) {
+          throw new Error(
+            "No OCR text was returned. Try taking a clearer photo and run again.",
+          );
+        }
+
+        const parsed = resultText
+          .split(/\r?\n/)
+          .filter((entry: string) => entry.includes(" - "))
+          .map((entry: string, i: number) => {
             const sep = entry.indexOf(" - ");
             return {
               id: String(i + 1),
@@ -42,6 +56,12 @@ export function Processing() {
               validation: { status: "pending" as const },
             };
           });
+
+        if (parsed.length === 0) {
+          throw new Error(
+            "OCR returned no valid 'Artist - Album' lines. Please retake the image.",
+          );
+        }
 
         setScannedAlbums(parsed);
         navigate("/review");
