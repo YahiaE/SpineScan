@@ -61,3 +61,6 @@ SpineScan uses a split frontend/backend architecture with async workers for resi
 - [backend/sql/captures.sql](backend/sql/captures.sql): capture manifest table migration.
 
 The project includes a React frontend and a Flask backend with Redis, RQ workers, Supabase, and Discogs OAuth.
+
+
+<img width="2525" height="1175" alt="mermaid-diagram" src="https://github.com/user-attachments/assets/294da624-9690-4e43-8491-e836aa8d0cfc" />
