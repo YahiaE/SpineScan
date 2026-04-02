@@ -4,7 +4,8 @@ SpineScan is a CD collection assistant that turns shelf photos into structured a
 
 ## Workflow
 
-<img width="2175" height="1104" alt="mermaid-diagram" src="https://github.com/user-attachments/assets/aa072833-c52f-4b6a-b28c-297c55830471" />
+<img width="3155" height="525" alt="mermaid-diagram" src="https://github.com/user-attachments/assets/4b489479-730f-48b5-abcc-8d415dfd8c9b" />
+
 
 SpineScan runs as a staged pipeline so users can review and correct results before writing to Discogs.
 
