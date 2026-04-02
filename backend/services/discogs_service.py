@@ -1,0 +1,832 @@
+import hashlib
+import json
+import os
+import time
+import unicodedata
+from datetime import datetime, timezone
+from difflib import SequenceMatcher
+
+import discogs_client
+from discogs_client.exceptions import HTTPError
+from flask import session
+from rq import Worker
+from rq.registry import (
+    DeferredJobRegistry,
+    FailedJobRegistry,
+    FinishedJobRegistry,
+    StartedJobRegistry,
+)
+
+from config import (
+    ALBUM_LOOKUP_CACHE_TTL_SECONDS,
+    ALBUM_LOOKUP_CACHE_VERSION,
+    ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS,
+    ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+    DISCOGS_AUTH_REQUEST_LIMIT,
+    DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE,
+    DISCOGS_LOOKUP_JOB_FUNC,
+    DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
+    DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM,
+    DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY,
+    DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES,
+    DISCOGS_MAX_RETRIES,
+    DISCOGS_RATE_WINDOW_SECONDS,
+    DISCOGS_UNAUTH_REQUEST_LIMIT,
+)
+from extensions import lookup_queue, redis_conn, supabase
+
+
+def get_discogs_client():
+    """Create an authenticated Discogs client from the current session."""
+    access_token = session.get("access_token")
+    access_token_secret = session.get("access_token_secret")
+
+    if not access_token or not access_token_secret:
+        raise ValueError("User not authenticated")
+
+    client = create_discogs_oauth_client()
+    client.set_token(access_token, access_token_secret)
+    return client
+
+
+def get_public_discogs_client():
+    """Create a Discogs client for shared public metadata lookups."""
+    return create_discogs_oauth_client()
+
+
+def get_discogs_consumer_credentials():
+    """Load Discogs app credentials from env and fail fast if missing."""
+    consumer_key = os.getenv("CONSUMER_KEY")
+    consumer_secret = os.getenv("CONSUMER_SECRET")
+
+    if not consumer_key or not consumer_secret:
+        raise RuntimeError(
+            "Discogs consumer credentials are not configured. "
+            "Set CONSUMER_KEY and CONSUMER_SECRET in backend env."
+        )
+
+    return consumer_key, consumer_secret
+
+
+def create_discogs_oauth_client():
+    """Create a Discogs client backed by OAuth fetcher methods."""
+    consumer_key, consumer_secret = get_discogs_consumer_credentials()
+
+    return discogs_client.Client(
+        "my_user_agent/1.0",
+        consumer_key=consumer_key,
+        consumer_secret=consumer_secret,
+    )
+
+
+def get_discogs_rate_bucket_key(authenticated):
+    bucket_start = int(time.time() // DISCOGS_RATE_WINDOW_SECONDS)
+    bucket_name = "auth" if authenticated else "unauth"
+    return f"discogs:rate:{bucket_name}:{bucket_start}"
+
+
+def acquire_discogs_rate_limit_slot(authenticated=True):
+    """Block until a shared Discogs rate-limit slot is available."""
+    limit = (
+        DISCOGS_AUTH_REQUEST_LIMIT if authenticated else DISCOGS_UNAUTH_REQUEST_LIMIT
+    )
+
+    while True:
+        bucket_key = get_discogs_rate_bucket_key(authenticated)
+        current_count = redis_conn.incr(bucket_key)
+        if current_count == 1:
+            redis_conn.expire(bucket_key, DISCOGS_RATE_WINDOW_SECONDS * 2)
+
+        if current_count <= limit:
+            return
+
+        redis_conn.decr(bucket_key)
+        wait_seconds = max(
+            0.25,
+            DISCOGS_RATE_WINDOW_SECONDS
+            - (time.time() % DISCOGS_RATE_WINDOW_SECONDS)
+            + 0.05,
+        )
+        time.sleep(min(wait_seconds, 5.0))
+
+
+def call_discogs(api_call, authenticated=True):
+    """Run a Discogs API call under a shared rate limiter with basic 429 retry."""
+    last_error = None
+
+    for attempt in range(DISCOGS_MAX_RETRIES):
+        acquire_discogs_rate_limit_slot(authenticated=authenticated)
+
+        try:
+            return api_call()
+        except HTTPError as error:
+            last_error = error
+            if getattr(error, "status_code", None) != 429:
+                raise
+
+            if attempt == DISCOGS_MAX_RETRIES - 1:
+                raise
+
+            time.sleep(min(2**attempt, 8))
+
+    if last_error is not None:
+        raise last_error
+
+
+class LookupBudget:
+    """Track and cap Discogs API calls consumed by one album lookup."""
+
+    def __init__(self, max_calls):
+        self.max_calls = max(1, int(max_calls))
+        self.calls_used = 0
+
+    def consume(self):
+        if self.calls_used >= self.max_calls:
+            return False
+
+        self.calls_used += 1
+        return True
+
+
+def iter_discogs_paginated_items(
+    paginated,
+    authenticated=True,
+    max_pages=1,
+    budget=None,
+):
+    """Iterate a Discogs paginated list while rate-limiting each page fetch."""
+    max_pages = max(1, int(max_pages))
+
+    if max_pages == 1:
+        if budget and not budget.consume():
+            return
+
+        page_items = call_discogs(
+            lambda: paginated.page(1),
+            authenticated=authenticated,
+        )
+        for item in page_items:
+            yield item
+        return
+
+    if budget and not budget.consume():
+        return
+
+    total_pages = call_discogs(lambda: paginated.pages, authenticated=authenticated)
+
+    for page_index in range(1, min(total_pages, max_pages) + 1):
+        if budget and not budget.consume():
+            return
+
+        page_items = call_discogs(
+            lambda page_index=page_index: paginated.page(page_index),
+            authenticated=authenticated,
+        )
+        for item in page_items:
+            yield item
+
+
+def get_discogs_identity(client):
+    return call_discogs(client.identity, authenticated=True)
+
+
+def get_discogs_collection_folders(user):
+    return call_discogs(lambda: user.collection_folders, authenticated=True)
+
+
+def normalize_text(value):
+    """Normalize strings for tolerant artist/title comparisons."""
+    text = str(value or "")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = (
+        text.replace("’", "'")
+        .replace("`", "'")
+        .replace("‘", "'")
+        .replace("–", "-")
+        .replace("—", "-")
+    )
+
+    normalized = "".join(ch.lower() for ch in text if ch.isalnum() or ch.isspace())
+    return " ".join(normalized.split()).strip()
+
+
+def strip_version_suffix(value):
+    """Remove common version suffixes that should not invalidate a match."""
+    text = str(value or "")
+    for marker in ["(", "[", " - deluxe", " - remaster", " - expanded"]:
+        index = text.lower().find(marker)
+        if index > 0:
+            text = text[:index]
+            break
+    return normalize_text(text)
+
+
+def primary_artist_name(value):
+    """Take the first artist from compound artist strings for looser matching."""
+    text = str(value or "")
+    lowered = text.lower()
+    for separator in [" feat. ", " featuring ", " ft. ", " & ", ",", "/", ";"]:
+        index = lowered.find(separator)
+        if index >= 0:
+            return text[:index].strip()
+    return text.strip()
+
+
+def text_similarity(left, right):
+    return SequenceMatcher(None, normalize_text(left), normalize_text(right)).ratio()
+
+
+def token_overlap(left, right):
+    left_tokens = set(normalize_text(left).split())
+    right_tokens = set(normalize_text(right).split())
+
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def parse_release_result(result):
+    """Extract comparable artist/title fields from a Discogs search result."""
+    raw_title = getattr(result, "title", "") or ""
+    raw_artist = ""
+
+    artists = getattr(result, "artists", None)
+    if artists:
+        raw_artist = ", ".join(
+            getattr(artist, "name", str(artist)) for artist in artists if artist
+        )
+
+    if not raw_artist and " - " in raw_title:
+        raw_artist, raw_title = raw_title.split(" - ", 1)
+
+    if raw_artist and " - " in raw_title:
+        title_prefix, title_remainder = raw_title.split(" - ", 1)
+        normalized_prefix = normalize_text(title_prefix)
+        normalized_artist = normalize_text(raw_artist)
+        normalized_primary_artist = normalize_text(primary_artist_name(raw_artist))
+
+        should_strip_prefix = normalized_prefix in {
+            normalized_artist,
+            normalized_primary_artist,
+        } or (
+            bool(normalized_prefix)
+            and (
+                normalized_prefix in normalized_artist
+                or normalized_prefix in normalized_primary_artist
+                or normalized_artist.startswith(normalized_prefix)
+                or normalized_primary_artist.startswith(normalized_prefix)
+            )
+        )
+
+        if should_strip_prefix:
+            raw_title = title_remainder
+
+    return raw_artist.strip(), raw_title.strip()
+
+
+def score_candidate(artist, title, matched_artist, matched_title):
+    """Score a Discogs candidate against OCR-extracted artist and title."""
+    artist_primary = primary_artist_name(artist)
+    matched_artist_primary = primary_artist_name(matched_artist)
+
+    title_base = strip_version_suffix(title)
+    matched_title_base = strip_version_suffix(matched_title)
+
+    artist_score = max(
+        text_similarity(artist, matched_artist),
+        text_similarity(artist_primary, matched_artist_primary),
+        token_overlap(artist, matched_artist),
+    )
+    title_score = max(
+        text_similarity(title, matched_title),
+        text_similarity(title_base, matched_title_base),
+        token_overlap(title, matched_title),
+    )
+
+    exact_artist = normalize_text(artist_primary) == normalize_text(
+        matched_artist_primary
+    )
+    exact_title = title_base == matched_title_base and bool(title_base)
+
+    combined_score = (artist_score * 0.45) + (title_score * 0.55)
+    if exact_artist:
+        combined_score += 0.08
+    if exact_title:
+        combined_score += 0.12
+
+    return {
+        "artist_score": artist_score,
+        "title_score": title_score,
+        "combined_score": min(combined_score, 1.0),
+        "exact_artist": exact_artist,
+        "exact_title": exact_title,
+    }
+
+
+def is_cd_release_result(result):
+    """Return True when Discogs search metadata indicates a CD format release."""
+    raw_formats = []
+
+    direct_format = getattr(result, "format", None)
+    if direct_format:
+        raw_formats.append(direct_format)
+
+    direct_formats = getattr(result, "formats", None)
+    if direct_formats:
+        raw_formats.extend(direct_formats)
+
+    data = getattr(result, "data", None)
+    if isinstance(data, dict):
+        data_format = data.get("format")
+        if data_format:
+            raw_formats.append(data_format)
+
+    normalized_formats = []
+    for item in raw_formats:
+        if isinstance(item, str):
+            normalized_formats.append(item.lower())
+        elif isinstance(item, (list, tuple, set)):
+            normalized_formats.extend(str(value).lower() for value in item if value)
+
+    return any("cd" in value for value in normalized_formats)
+
+
+def iter_release_candidates(client, artist, title, authenticated=True, budget=None):
+    """Yield unique Discogs release candidates from multiple query strategies."""
+    primary_artist = primary_artist_name(artist)
+    queries = [
+        {
+            "type": "release",
+            "artist": artist,
+            "release_title": title,
+            "format": "CD",
+        },
+        {
+            "type": "release",
+            "artist": primary_artist,
+            "release_title": title,
+            "format": "CD",
+        },
+        {"type": "release", "q": f"{artist} {title}", "format": "CD"},
+        {"type": "release", "q": f"{primary_artist} {title}", "format": "CD"},
+        {"type": "release", "q": title, "artist": artist, "format": "CD"},
+    ][: max(1, DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES)]
+
+    seen_release_ids = set()
+
+    for query in queries:
+        if budget and not budget.consume():
+            break
+
+        try:
+            search_results = call_discogs(
+                lambda query=query: client.search(**query),
+                authenticated=authenticated,
+            )
+        except Exception:
+            continue
+
+        for index, result in enumerate(
+            iter_discogs_paginated_items(
+                search_results,
+                authenticated=authenticated,
+                max_pages=DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY,
+                budget=budget,
+            )
+        ):
+            if index >= 10:
+                break
+
+            release_id = getattr(result, "id", None)
+            if not release_id or release_id in seen_release_ids:
+                continue
+
+            if not is_cd_release_result(result):
+                continue
+
+            seen_release_ids.add(release_id)
+            yield result
+
+
+def find_best_release_match(client, artist, title, authenticated=True):
+    """Find the best matching Discogs release for a scanned album entry."""
+    best_match = None
+    budget = LookupBudget(DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM)
+
+    for result in iter_release_candidates(
+        client,
+        artist,
+        title,
+        authenticated=authenticated,
+        budget=budget,
+    ):
+        matched_artist, matched_title = parse_release_result(result)
+        scores = score_candidate(artist, title, matched_artist, matched_title)
+
+        if (
+            best_match is None
+            or scores["combined_score"] > best_match["combined_score"]
+        ):
+            best_match = {
+                "release_id": getattr(result, "id", None),
+                "matched_artist": matched_artist,
+                "matched_title": matched_title,
+                **scores,
+            }
+
+            should_accept_early = (
+                best_match["exact_title"]
+                and best_match["artist_score"] >= 0.65
+                and best_match["combined_score"] >= DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE
+            )
+            if should_accept_early:
+                break
+
+    if not best_match:
+        return {
+            "status": "invalid",
+            "message": "No Discogs release match found",
+        }
+
+    has_strong_exact_title_match = (
+        best_match["exact_title"] and best_match["artist_score"] >= 0.50
+    )
+
+    is_valid = best_match["release_id"] is not None and (
+        (
+            best_match["artist_score"] >= 0.58
+            and best_match["title_score"] >= 0.68
+            and best_match["combined_score"] >= 0.72
+        )
+        or has_strong_exact_title_match
+    )
+
+    return {
+        "status": "valid" if is_valid else "invalid",
+        "message": "Matched Discogs release"
+        if is_valid
+        else (
+            f"Closest Discogs match was {best_match['matched_artist']} - "
+            f"{best_match['matched_title']}"
+        ),
+        **best_match,
+    }
+
+
+def add_release_to_folder(client, username, folder_id, release_id):
+    """Add a release to a Discogs collection folder."""
+    url = (
+        f"{client._base_url}/users/{username}/collection/"
+        f"folders/{folder_id}/releases/{release_id}"
+    )
+    return call_discogs(lambda: client._post(url, None), authenticated=True)
+
+
+def get_collection_folder(collection_folders, folder_id):
+    """Return the selected Discogs collection folder object if it exists."""
+    for folder in collection_folders:
+        if folder.id == folder_id:
+            return folder
+    return None
+
+
+def is_discogs_duplicate_error(error):
+    """Best-effort detection for Discogs duplicate-in-folder API responses."""
+    message = str(getattr(error, "msg", "") or error).lower()
+    status_code = getattr(error, "status_code", None)
+
+    duplicate_markers = [
+        "already in",
+        "already exists",
+        "duplicate",
+        "already added",
+    ]
+
+    if any(marker in message for marker in duplicate_markers):
+        return True
+
+    return status_code in {409, 422} and "already" in message
+
+
+def build_import_request_fingerprint(folder_id, entries):
+    """Build a stable fingerprint for import idempotency."""
+    normalized_entries = []
+    for entry in entries:
+        normalized_entries.append(
+            {
+                "id": str(entry.get("id", "")).strip(),
+                "artist": str(entry.get("artist", "")).strip().lower(),
+                "title": str(entry.get("title", "")).strip().lower(),
+                "release_id": str(entry.get("release_id", "")).strip(),
+            }
+        )
+
+    normalized_entries.sort(
+        key=lambda item: (
+            item["id"],
+            item["artist"],
+            item["title"],
+            item["release_id"],
+        )
+    )
+
+    payload = {
+        "folder_id": int(folder_id),
+        "entries": normalized_entries,
+    }
+    encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded_payload.encode("utf-8")).hexdigest()
+
+
+def album_identity_key(artist, title):
+    """Build a normalized key for a logical album regardless of release variant."""
+    return (
+        normalize_text(primary_artist_name(artist)),
+        strip_version_suffix(title),
+    )
+
+
+def album_lookup_normalized_key(artist, title):
+    """Serialize the album identity key for Redis and Postgres lookups."""
+    normalized_artist, normalized_title = album_identity_key(artist, title)
+    return f"{normalized_artist}::{normalized_title}"
+
+
+def album_lookup_cache_key(normalized_key):
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:{normalized_key}"
+
+
+def album_lookup_pending_key(normalized_key):
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:{normalized_key}"
+
+
+def utc_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def build_pending_lookup_result(message="Queued for Discogs lookup"):
+    return {
+        "status": "pending",
+        "message": message,
+    }
+
+
+def build_lookup_result_from_row(row, fallback_artist, fallback_title):
+    """Translate a persisted albums row into the validation response shape."""
+    release_id = row.get("discogs_release_id")
+
+    if release_id is None:
+        return {
+            "status": "invalid",
+            "message": "No Discogs release match found",
+        }
+
+    return {
+        "status": "valid",
+        "message": "Matched Discogs release",
+        "release_id": int(release_id),
+        "matched_artist": row.get("artist") or fallback_artist,
+        "matched_title": row.get("album") or fallback_title,
+    }
+
+
+def read_cached_lookup_result(normalized_key):
+    payload = redis_conn.get(album_lookup_cache_key(normalized_key))
+    if not payload:
+        return None
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        redis_conn.delete(album_lookup_cache_key(normalized_key))
+        return None
+
+
+def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
+    cacheable_result = {
+        "status": result.get("status"),
+        "message": result.get("message"),
+        "release_id": result.get("release_id"),
+        "matched_artist": result.get("matched_artist"),
+        "matched_title": result.get("matched_title"),
+    }
+
+    effective_ttl = ttl_seconds or ALBUM_LOOKUP_CACHE_TTL_SECONDS
+
+    redis_conn.setex(
+        album_lookup_cache_key(normalized_key),
+        effective_ttl,
+        json.dumps(cacheable_result),
+    )
+    redis_conn.delete(album_lookup_pending_key(normalized_key))
+    return cacheable_result
+
+
+def fetch_lookup_row_from_postgres(normalized_key):
+    try:
+        response = (
+            supabase.table("albums")
+            .select("artist, album, normalized_key, discogs_release_id")
+            .eq("normalized_key", normalized_key)
+            .limit(1)
+            .execute()
+        )
+    except Exception as error:
+        print(f"Failed to read cached album lookup from Supabase: {error}")
+        return None
+
+    rows = getattr(response, "data", None) or []
+    return rows[0] if rows else None
+
+
+def persist_lookup_result(normalized_key, requested_artist, requested_title, match):
+    release_id = match.get("release_id") if match.get("status") == "valid" else None
+    stored_artist = (
+        match.get("matched_artist") if release_id is not None else requested_artist
+    ) or requested_artist
+    stored_album = (
+        match.get("matched_title") if release_id is not None else requested_title
+    ) or requested_title
+
+    if release_id is None:
+        try:
+            supabase.table("albums").delete().eq(
+                "normalized_key", normalized_key
+            ).execute()
+        except Exception as error:
+            print(f"Failed to delete invalid album lookup from Supabase: {error}")
+
+        return write_cached_lookup_result(
+            normalized_key,
+            {
+                "status": "invalid",
+                "message": match.get("message") or "No Discogs release match found",
+                "release_id": None,
+                "matched_artist": None,
+                "matched_title": None,
+            },
+            ttl_seconds=ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS,
+        )
+
+    try:
+        (
+            supabase.table("albums")
+            .upsert(
+                {
+                    "artist": stored_artist,
+                    "album": stored_album,
+                    "normalized_key": normalized_key,
+                    "discogs_release_id": int(release_id),
+                    "updated_at": utc_timestamp(),
+                },
+                on_conflict="normalized_key",
+            )
+            .execute()
+        )
+    except Exception as error:
+        print(f"Failed to persist album lookup to Supabase: {error}")
+
+    return write_cached_lookup_result(
+        normalized_key,
+        {
+            "status": "valid",
+            "message": match.get("message") or "Matched Discogs release",
+            "release_id": int(release_id),
+            "matched_artist": match.get("matched_artist"),
+            "matched_title": match.get("matched_title"),
+        },
+    )
+
+
+def enqueue_album_lookup_job(artist, title, normalized_key):
+    pending_key = album_lookup_pending_key(normalized_key)
+    existing_job_id = redis_conn.get(pending_key)
+    if existing_job_id:
+        return existing_job_id
+
+    acquired = redis_conn.set(
+        pending_key,
+        "queued",
+        nx=True,
+        ex=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+    )
+    if not acquired:
+        return redis_conn.get(pending_key)
+
+    try:
+        job = lookup_queue.enqueue(
+            DISCOGS_LOOKUP_JOB_FUNC,
+            artist,
+            title,
+            normalized_key,
+            job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
+            result_ttl=0,
+            failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+        )
+    except Exception:
+        redis_conn.delete(pending_key)
+        raise
+
+    redis_conn.setex(pending_key, ALBUM_LOOKUP_PENDING_TTL_SECONDS, job.id)
+    return job.id
+
+
+def has_lookup_worker_available():
+    """Return True when at least one worker is listening to the lookup queue."""
+    try:
+        workers = Worker.all(connection=redis_conn, queue=lookup_queue)
+        return len(workers) > 0
+    except Exception:
+        return False
+
+
+def count_lookup_pending_markers():
+    """Count Redis pending markers used to deduplicate lookup jobs."""
+    count = 0
+    for _ in redis_conn.scan_iter(
+        match=f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:*"
+    ):
+        count += 1
+    return count
+
+
+def get_lookup_queue_stats():
+    """Collect queue and worker telemetry for the validation pipeline."""
+    workers = Worker.all(connection=redis_conn, queue=lookup_queue)
+    started_registry = StartedJobRegistry(queue=lookup_queue)
+    failed_registry = FailedJobRegistry(queue=lookup_queue)
+    finished_registry = FinishedJobRegistry(queue=lookup_queue)
+    deferred_registry = DeferredJobRegistry(queue=lookup_queue)
+
+    return {
+        "queue_name": lookup_queue.name,
+        "workers_online": len(workers),
+        "queued_jobs": lookup_queue.count,
+        "started_jobs": len(started_registry),
+        "failed_jobs": len(failed_registry),
+        "finished_jobs": len(finished_registry),
+        "deferred_jobs": len(deferred_registry),
+        "pending_markers": count_lookup_pending_markers(),
+        "sync_fallback_active": len(workers) == 0,
+        "timestamp": utc_timestamp(),
+    }
+
+
+def resolve_release_match(artist, title, enqueue_if_missing=True):
+    """Resolve an album validation from Redis, Postgres, or the async queue."""
+    normalized_key = album_lookup_normalized_key(artist, title)
+    pending_key = album_lookup_pending_key(normalized_key)
+
+    cached_result = read_cached_lookup_result(normalized_key)
+    if cached_result:
+        return cached_result
+
+    persisted_row = fetch_lookup_row_from_postgres(normalized_key)
+    if persisted_row:
+        return write_cached_lookup_result(
+            normalized_key,
+            build_lookup_result_from_row(persisted_row, artist, title),
+        )
+
+    if redis_conn.get(pending_key):
+        if has_lookup_worker_available():
+            return build_pending_lookup_result()
+        redis_conn.delete(pending_key)
+
+    if not enqueue_if_missing:
+        return build_pending_lookup_result("Validation has not completed yet")
+
+    if not has_lookup_worker_available():
+        try:
+            return run_album_lookup_job(artist, title, normalized_key)
+        except Exception as error:
+            return {
+                "status": "invalid",
+                "message": f"Discogs lookup failed without worker: {error}",
+            }
+
+    try:
+        enqueue_album_lookup_job(artist, title, normalized_key)
+    except Exception as error:
+        return {
+            "status": "invalid",
+            "message": f"Failed to queue Discogs lookup: {error}",
+        }
+
+    return build_pending_lookup_result()
+
+
+def run_album_lookup_job(artist, title, normalized_key=None):
+    """Worker entrypoint for Discogs album lookups on cache misses."""
+    lookup_key = normalized_key or album_lookup_normalized_key(artist, title)
+
+    try:
+        client = get_public_discogs_client()
+        match = find_best_release_match(client, artist, title, authenticated=False)
+        return persist_lookup_result(lookup_key, artist, title, match)
+    except Exception as error:
+        redis_conn.delete(album_lookup_pending_key(lookup_key))
+        print(f"Discogs lookup job failed for {artist} - {title}: {error}")
+        raise
