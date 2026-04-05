@@ -76,9 +76,12 @@ def exchange_access_token():
             lambda: d.get_access_token(oauth_verifier),
             authenticated=False,
         )
+        d.set_token(access_token, access_token_secret)
+        identity = call_discogs(d.identity, authenticated=True)
 
         session["access_token"] = access_token
         session["access_token_secret"] = access_token_secret
+        session["discogs_username"] = getattr(identity, "username", None)
 
         redis_conn.delete(oauth_token)
 

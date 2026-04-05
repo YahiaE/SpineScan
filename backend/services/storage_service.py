@@ -13,8 +13,18 @@ CAPTURE_MANIFEST_FIELDS = (
 )
 
 
-def build_capture_user_scope(access_token):
-    return hashlib.sha256(access_token.encode("utf-8")).hexdigest()[:24]
+def build_capture_user_scope(access_token, discogs_username=None):
+    """Build a stable capture scope id.
+
+    Prefer Discogs username when available so re-auth/token rotation does not
+    move the user into a different capture scope.
+    """
+    if discogs_username:
+        scope_seed = f"user:{str(discogs_username).strip().lower()}"
+    else:
+        scope_seed = f"token:{str(access_token or '').strip()}"
+
+    return hashlib.sha256(scope_seed.encode("utf-8")).hexdigest()[:24]
 
 
 def build_capture_object_key(user_scope, file_bytes, suffix):
@@ -146,6 +156,20 @@ def mark_capture_manifest_status(capture_id, status):
             }
         )
         .eq("id", capture_id)
+        .execute()
+    )
+
+
+def delete_capture_manifest_record(capture_id):
+    return supabase.table("captures").delete().eq("id", capture_id).execute()
+
+
+def delete_capture_manifest_records_by_object_key(user_scope, object_key):
+    return (
+        supabase.table("captures")
+        .delete()
+        .eq("user_scope", user_scope)
+        .eq("object_key", object_key)
         .execute()
     )
 

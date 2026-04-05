@@ -4,7 +4,6 @@ from flask import Blueprint, session, request
 
 from config import (
     ALLOWED_MIME,
-    DELETE_CAPTURE_AFTER_PROCESS,
 )
 from ocr_functions.process_image import main as process_image_main
 from services.storage_service import (
@@ -14,6 +13,8 @@ from services.storage_service import (
     build_capture_user_scope,
     create_capture_manifest_record,
     delete_capture_from_bucket,
+    delete_capture_manifest_record,
+    delete_capture_manifest_records_by_object_key,
     download_capture_from_bucket,
     find_latest_capture_object_key,
     get_capture_manifest_record_by_object_key,
@@ -36,6 +37,18 @@ from services.discogs_service import (
 data_bp = Blueprint("data", __name__)
 
 
+def _capture_scope_candidates(access_token):
+    """Return deterministic capture scopes to support old/new scope seeds."""
+    username = session.get("discogs_username")
+    primary_scope = build_capture_user_scope(access_token, username)
+    token_scope = build_capture_user_scope(access_token)
+
+    if token_scope == primary_scope:
+        return [primary_scope]
+
+    return [primary_scope, token_scope]
+
+
 def _read_verified_capture_bytes(record):
     """Verify the signed manifest before reading bytes so routes share one trust path."""
     is_valid_signature = verify_capture_signature(
@@ -52,6 +65,41 @@ def _read_verified_capture_bytes(record):
     return file_bytes, suffix
 
 
+def _find_capture_for_cleanup(access_token, requested_path=None):
+    """Resolve a capture record/object_key for cleanup across scope candidates."""
+    scope_candidates = _capture_scope_candidates(access_token)
+
+    if requested_path:
+        for scope in scope_candidates:
+            record = get_capture_manifest_record_by_object_key(scope, requested_path)
+            if record:
+                return record
+
+        for scope in scope_candidates:
+            if requested_path.startswith(f"{scope}/"):
+                return {
+                    "id": None,
+                    "user_scope": scope,
+                    "object_key": requested_path,
+                    "checksum_sha256": None,
+                    "signature": None,
+                }
+
+        return None
+
+    for scope in scope_candidates:
+        record = get_latest_capture_manifest_record(scope, statuses=["processed"])
+        if record:
+            return record
+
+    for scope in scope_candidates:
+        record = get_latest_capture_manifest_record(scope, statuses=["uploaded"])
+        if record:
+            return record
+
+    return None
+
+
 @data_bp.route("/data/capture-debug", methods=["GET"])
 def capture_debug():
     """Debug endpoint for capture lookup path (scope, manifest, bucket visibility)."""
@@ -59,20 +107,32 @@ def capture_debug():
     if not access_token:
         return {"error": "User not authenticated"}, 401
 
-    user_scope = build_capture_user_scope(access_token)
-    latest_uploaded = get_latest_capture_manifest_record(
-        user_scope, statuses=["uploaded"]
-    )
-    latest_processed = get_latest_capture_manifest_record(
-        user_scope, statuses=["processed"]
-    )
+    scope_candidates = _capture_scope_candidates(access_token)
+    user_scope = scope_candidates[0]
+    latest_uploaded = None
+    latest_processed = None
+    selected_scope = user_scope
+    scope_objects = []
+
+    for scope in scope_candidates:
+        uploaded = get_latest_capture_manifest_record(scope, statuses=["uploaded"])
+        processed = get_latest_capture_manifest_record(scope, statuses=["processed"])
+        objects = list_capture_objects_for_scope(scope)
+        if (uploaded or processed or objects) and selected_scope == user_scope:
+            selected_scope = scope
+            scope_objects = objects
+            latest_uploaded = uploaded
+            latest_processed = processed
+
+    if not scope_objects:
+        scope_objects = list_capture_objects_for_scope(selected_scope)
     latest_any_scope = get_latest_capture_manifest_record_any(
         statuses=["uploaded", "processed"]
     )
-    scope_objects = list_capture_objects_for_scope(user_scope)
 
     return {
-        "user_scope": user_scope,
+        "user_scope": selected_scope,
+        "scope_candidates": scope_candidates,
         "latest_uploaded": latest_uploaded,
         "latest_processed": latest_processed,
         "latest_any_scope": latest_any_scope,
@@ -104,7 +164,10 @@ def upload_image():
     if not file_bytes:
         return {"error": "Uploaded file is empty"}, 400
 
-    user_scope = build_capture_user_scope(access_token)
+    user_scope = build_capture_user_scope(
+        access_token,
+        session.get("discogs_username"),
+    )
     object_key = build_capture_object_key(user_scope, file_bytes, suffix)
     checksum = build_capture_checksum(file_bytes)
     signature = build_capture_signature(user_scope, object_key, checksum)
@@ -149,8 +212,13 @@ def scan_image():
     if not access_token:
         return {"error": "User not authenticated"}, 401
 
-    user_scope = build_capture_user_scope(access_token)
-    record = get_capture_manifest_record_by_object_key(user_scope, path)
+    scope_candidates = _capture_scope_candidates(access_token)
+    record = None
+    for scope in scope_candidates:
+        record = get_capture_manifest_record_by_object_key(scope, path)
+        if record:
+            break
+
     if not record:
         return {"error": "Capture not found for this user"}, 404
 
@@ -178,19 +246,79 @@ def process_latest_image():
     except ValueError:
         return {"error": "User not authenticated"}, 401
 
-    user_scope = build_capture_user_scope(access_token)
-    latest_capture = get_latest_capture_manifest_record(
-        user_scope, statuses=["uploaded"]
-    )
-    if not latest_capture:
-        latest_capture = get_latest_capture_manifest_record(
-            user_scope, statuses=["processed"]
-        )
+    scope_candidates = _capture_scope_candidates(access_token)
+    user_scope = scope_candidates[0]
+    selected_scope = user_scope
+    latest_capture = None
+    requested_path = request.args.get("path")
+
+    if requested_path:
+        for scope in scope_candidates:
+            latest_capture = get_capture_manifest_record_by_object_key(
+                scope,
+                requested_path,
+            )
+            if latest_capture:
+                selected_scope = scope
+                break
+
+        if not latest_capture:
+            for scope in scope_candidates:
+                if not requested_path.startswith(f"{scope}/"):
+                    continue
+
+                try:
+                    requested_bytes = download_capture_from_bucket(requested_path)
+                except Exception:
+                    continue
+
+                requested_checksum = build_capture_checksum(requested_bytes)
+                requested_signature = build_capture_signature(
+                    scope,
+                    requested_path,
+                    requested_checksum,
+                )
+                latest_capture = {
+                    "id": None,
+                    "user_scope": scope,
+                    "object_key": requested_path,
+                    "checksum_sha256": requested_checksum,
+                    "signature": requested_signature,
+                    "status": "uploaded",
+                }
+                selected_scope = scope
+                break
 
     if not latest_capture:
-        fallback_object_key = find_latest_capture_object_key(user_scope)
+        for scope in scope_candidates:
+            latest_capture = get_latest_capture_manifest_record(
+                scope, statuses=["uploaded"]
+            )
+            if latest_capture:
+                selected_scope = scope
+                break
+
+    if not latest_capture:
+        for scope in scope_candidates:
+            latest_capture = get_latest_capture_manifest_record(
+                scope, statuses=["processed"]
+            )
+            if latest_capture:
+                selected_scope = scope
+                break
+
+    if not latest_capture:
+        fallback_object_key = None
+        for scope in scope_candidates:
+            fallback_object_key = find_latest_capture_object_key(scope)
+            if fallback_object_key:
+                selected_scope = scope
+                break
+
         if not fallback_object_key:
             scope_objects = list_capture_objects_for_scope(user_scope)
+            for scope in scope_candidates[1:]:
+                scope_objects.extend(list_capture_objects_for_scope(scope))
             latest_any_scope = get_latest_capture_manifest_record_any(
                 statuses=["uploaded", "processed"]
             )
@@ -198,6 +326,7 @@ def process_latest_image():
                 "error": "No images found",
                 "debug": {
                     "user_scope": user_scope,
+                    "scope_candidates": scope_candidates,
                     "scope_object_count": len(scope_objects),
                     "latest_any_scope": latest_any_scope,
                 },
@@ -210,14 +339,14 @@ def process_latest_image():
 
         fallback_checksum = build_capture_checksum(fallback_bytes)
         fallback_signature = build_capture_signature(
-            user_scope,
+            selected_scope,
             fallback_object_key,
             fallback_checksum,
         )
 
         try:
             create_capture_manifest_record(
-                user_scope=user_scope,
+                user_scope=selected_scope,
                 object_key=fallback_object_key,
                 content_type="image/jpeg",
                 checksum=fallback_checksum,
@@ -228,7 +357,7 @@ def process_latest_image():
 
         latest_capture = {
             "id": None,
-            "user_scope": user_scope,
+            "user_scope": selected_scope,
             "object_key": fallback_object_key,
             "checksum_sha256": fallback_checksum,
             "signature": fallback_signature,
@@ -246,18 +375,8 @@ def process_latest_image():
     try:
         result = with_temp_file_from_bytes(file_bytes, suffix, process_image_main)
 
-        if DELETE_CAPTURE_AFTER_PROCESS:
-            try:
-                delete_capture_from_bucket(latest_image_key)
-                if latest_capture.get("id") is not None:
-                    mark_capture_manifest_status(latest_capture.get("id"), "deleted")
-            except Exception as cleanup_error:
-                print(
-                    f"Failed to delete processed capture from bucket: {cleanup_error}"
-                )
-        else:
-            if latest_capture.get("id") is not None:
-                mark_capture_manifest_status(latest_capture.get("id"), "processed")
+        if latest_capture.get("id") is not None:
+            mark_capture_manifest_status(latest_capture.get("id"), "processed")
 
         return {
             "success": True,
@@ -267,6 +386,61 @@ def process_latest_image():
         }
     except Exception as e:
         return {"error": str(e)}, 500
+
+
+@data_bp.route("/data/capture/finalize", methods=["POST"])
+def finalize_capture():
+    """Delete a processed/uploaded capture once the flow is complete."""
+    access_token = session.get("access_token")
+    if not access_token:
+        return {"error": "User not authenticated"}, 401
+
+    body = request.get_json(silent=True) or {}
+    requested_path = body.get("path")
+
+    capture = _find_capture_for_cleanup(access_token, requested_path=requested_path)
+    if not capture:
+        return {"deleted": False, "reason": "No capture to finalize"}, 200
+
+    checksum = capture.get("checksum_sha256")
+    signature = capture.get("signature")
+    if checksum and signature:
+        is_valid_signature = verify_capture_signature(
+            user_scope=capture.get("user_scope"),
+            object_key=capture.get("object_key"),
+            checksum=checksum,
+            signature=signature,
+        )
+        if not is_valid_signature:
+            return {"error": "Capture ownership signature is invalid"}, 403
+
+    try:
+        delete_capture_from_bucket(capture.get("object_key"))
+    except Exception:
+        pass
+
+    if capture.get("id") is not None:
+        try:
+            mark_capture_manifest_status(capture.get("id"), "deleted")
+        except Exception:
+            pass
+        try:
+            delete_capture_manifest_record(capture.get("id"))
+        except Exception:
+            pass
+    else:
+        try:
+            delete_capture_manifest_records_by_object_key(
+                capture.get("user_scope"),
+                capture.get("object_key"),
+            )
+        except Exception:
+            pass
+
+    return {
+        "deleted": True,
+        "object_key": capture.get("object_key"),
+    }, 200
 
 
 @data_bp.route("/data/albums", methods=["GET"])
