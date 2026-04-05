@@ -24,6 +24,7 @@ from config import (
     ALBUM_LOOKUP_PENDING_TTL_SECONDS,
     COLLECTION_CACHE_TTL_SECONDS,
     COLLECTION_CACHE_VERSION,
+    DISCOGS_COLLECTION_WARM_MAX_PAGES,
     DISCOGS_AUTH_REQUEST_LIMIT,
     DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE,
     DISCOGS_LOOKUP_JOB_FUNC,
@@ -565,7 +566,7 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
     for item in iter_discogs_paginated_items(
         folder.releases,
         authenticated=True,
-        max_pages=1000,
+        max_pages=DISCOGS_COLLECTION_WARM_MAX_PAGES,
     ):
         release = getattr(item, "release", None) or item
         release_id = getattr(release, "id", None)
