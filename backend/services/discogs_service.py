@@ -22,6 +22,8 @@ from config import (
     ALBUM_LOOKUP_CACHE_VERSION,
     ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS,
     ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+    COLLECTION_CACHE_TTL_SECONDS,
+    COLLECTION_CACHE_VERSION,
     DISCOGS_AUTH_REQUEST_LIMIT,
     DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE,
     DISCOGS_LOOKUP_JOB_FUNC,
@@ -490,6 +492,228 @@ def get_collection_folder(collection_folders, folder_id):
         if folder.id == folder_id:
             return folder
     return None
+
+
+def serialize_album_identity_key(album_key):
+    """Serialize an album identity tuple for cache and durable lookup keys."""
+    artist_key, title_key = album_key
+    return f"{artist_key}::{title_key}"
+
+
+def _collection_release_cache_key(discogs_username, folder_id):
+    return (
+        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
+        f"{discogs_username}:{int(folder_id)}:release_ids"
+    )
+
+
+def _collection_album_cache_key(discogs_username, folder_id):
+    return (
+        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
+        f"{discogs_username}:{int(folder_id)}:album_keys"
+    )
+
+
+def _collection_warm_marker_key(discogs_username, folder_id):
+    return (
+        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
+        f"{discogs_username}:{int(folder_id)}:warmed"
+    )
+
+
+def _collection_durable_marker_key(discogs_username, folder_id):
+    return (
+        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
+        f"{discogs_username}:{int(folder_id)}:durable"
+    )
+
+
+def _set_collection_cache_expiry(discogs_username, folder_id):
+    release_key = _collection_release_cache_key(discogs_username, folder_id)
+    album_key = _collection_album_cache_key(discogs_username, folder_id)
+    warm_marker_key = _collection_warm_marker_key(discogs_username, folder_id)
+    durable_marker_key = _collection_durable_marker_key(discogs_username, folder_id)
+    redis_conn.expire(release_key, COLLECTION_CACHE_TTL_SECONDS)
+    redis_conn.expire(album_key, COLLECTION_CACHE_TTL_SECONDS)
+    redis_conn.expire(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS)
+    redis_conn.expire(durable_marker_key, COLLECTION_CACHE_TTL_SECONDS)
+
+
+def ensure_collection_membership_cache_warm(client, discogs_username, folder):
+    """Hydrate Redis and durable Supabase membership cache from Discogs."""
+    folder_id = int(folder.id)
+    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
+    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
+    warm_marker_key = _collection_warm_marker_key(discogs_username, folder_id)
+    durable_marker_key = _collection_durable_marker_key(discogs_username, folder_id)
+
+    warm_marker_exists = bool(redis_conn.get(warm_marker_key))
+    durable_marker_exists = bool(redis_conn.get(durable_marker_key))
+
+    if warm_marker_exists and durable_marker_exists:
+        return
+
+    release_count = redis_conn.scard(release_set_key)
+    album_count = redis_conn.scard(album_set_key)
+    if (release_count > 0 or album_count > 0) and durable_marker_exists:
+        redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
+        _set_collection_cache_expiry(discogs_username, folder_id)
+        return
+
+    warmed_entries = 0
+    durable_rows_by_release = {}
+    for item in iter_discogs_paginated_items(
+        folder.releases,
+        authenticated=True,
+        max_pages=1000,
+    ):
+        release = getattr(item, "release", None) or item
+        release_id = getattr(release, "id", None)
+        if release_id is None:
+            continue
+
+        release_title = getattr(release, "title", "")
+        release_artists = getattr(release, "artists", None) or []
+        release_artist_name = ""
+        if release_artists:
+            release_artist_name = getattr(release_artists[0], "name", "") or ""
+
+        album_key = album_identity_key(release_artist_name, release_title)
+        serialized_album_key = serialize_album_identity_key(album_key)
+        redis_conn.sadd(release_set_key, str(int(release_id)))
+        redis_conn.sadd(album_set_key, serialized_album_key)
+        durable_rows_by_release[int(release_id)] = {
+            "discogs_username": discogs_username,
+            "folder_id": folder_id,
+            "release_id": int(release_id),
+            "album_key": serialized_album_key,
+            "last_seen_at": utc_timestamp(),
+        }
+        warmed_entries += 1
+
+    durable_rows = list(durable_rows_by_release.values())
+
+    if durable_rows:
+        try:
+            (
+                supabase.table("discogs_collection_cache")
+                .upsert(
+                    durable_rows,
+                    on_conflict="discogs_username,folder_id,release_id",
+                )
+                .execute()
+            )
+            redis_conn.setex(durable_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
+        except Exception as error:
+            print(f"Failed to backfill durable collection cache: {error}")
+
+    redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
+    _set_collection_cache_expiry(discogs_username, folder_id)
+
+    if warmed_entries == 0:
+        # Keep an empty-folder marker so we do not re-fetch on every import.
+        redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
+
+
+def cache_collection_membership_entry(
+    discogs_username,
+    folder_id,
+    release_id,
+    album_key,
+):
+    """Write-through membership cache for fast duplicate checks in imports."""
+    normalized_release_id = int(release_id)
+    serialized_album_key = serialize_album_identity_key(album_key)
+
+    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
+    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
+
+    redis_conn.sadd(release_set_key, str(normalized_release_id))
+    redis_conn.sadd(album_set_key, serialized_album_key)
+    _set_collection_cache_expiry(discogs_username, folder_id)
+
+    try:
+        (
+            supabase.table("discogs_collection_cache")
+            .upsert(
+                {
+                    "discogs_username": discogs_username,
+                    "folder_id": int(folder_id),
+                    "release_id": normalized_release_id,
+                    "album_key": serialized_album_key,
+                    "last_seen_at": utc_timestamp(),
+                },
+                on_conflict="discogs_username,folder_id,release_id",
+            )
+            .execute()
+        )
+        redis_conn.setex(
+            _collection_durable_marker_key(discogs_username, folder_id),
+            COLLECTION_CACHE_TTL_SECONDS,
+            "1",
+        )
+    except Exception as error:
+        print(f"Failed to persist collection cache entry: {error}")
+
+
+def is_release_in_collection_cache(discogs_username, folder_id, release_id):
+    """Return True when release membership is already known for this folder."""
+    normalized_release_id = int(release_id)
+    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
+    if redis_conn.sismember(release_set_key, str(normalized_release_id)):
+        return True
+
+    try:
+        response = (
+            supabase.table("discogs_collection_cache")
+            .select("release_id")
+            .eq("discogs_username", discogs_username)
+            .eq("folder_id", int(folder_id))
+            .eq("release_id", normalized_release_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+    except Exception as error:
+        print(f"Failed to read release membership cache: {error}")
+        return False
+
+    if not rows:
+        return False
+
+    redis_conn.sadd(release_set_key, str(normalized_release_id))
+    _set_collection_cache_expiry(discogs_username, folder_id)
+    return True
+
+
+def is_album_in_collection_cache(discogs_username, folder_id, album_key):
+    """Return True when a normalized album identity is already known in folder."""
+    serialized_album_key = serialize_album_identity_key(album_key)
+    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
+    if redis_conn.sismember(album_set_key, serialized_album_key):
+        return True
+
+    try:
+        response = (
+            supabase.table("discogs_collection_cache")
+            .select("album_key")
+            .eq("discogs_username", discogs_username)
+            .eq("folder_id", int(folder_id))
+            .eq("album_key", serialized_album_key)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+    except Exception as error:
+        print(f"Failed to read album membership cache: {error}")
+        return False
+
+    if not rows:
+        return False
+
+    redis_conn.sadd(album_set_key, serialized_album_key)
+    _set_collection_cache_expiry(discogs_username, folder_id)
+    return True
 
 
 def is_discogs_duplicate_error(error):

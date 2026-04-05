@@ -10,12 +10,16 @@ from services.discogs_service import (
     add_release_to_folder,
     album_identity_key,
     build_import_request_fingerprint,
+    cache_collection_membership_entry,
+    ensure_collection_membership_cache_warm,
     get_collection_folder,
     get_discogs_client,
     get_discogs_collection_folders,
     get_discogs_identity,
     get_lookup_queue_stats,
+    is_album_in_collection_cache,
     is_discogs_duplicate_error,
+    is_release_in_collection_cache,
     resolve_release_match,
 )
 
@@ -159,6 +163,16 @@ def import_entries():
                 {"error": "Selected collection folder is not available"}
             ), 404
 
+        try:
+            ensure_collection_membership_cache_warm(
+                d,
+                user.username,
+                target_folder,
+            )
+        except Exception as warm_error:
+            # Non-fatal: fallback duplicate detection still runs via API response.
+            print(f"Collection cache warm-up failed: {warm_error}")
+
         pending_release_ids = set()
         pending_album_keys = set()
         results = []
@@ -231,6 +245,23 @@ def import_entries():
                 )
                 continue
 
+            if is_release_in_collection_cache(
+                user.username,
+                folder_id,
+                normalized_release_id,
+            ):
+                results.append(
+                    {
+                        "id": entry_id,
+                        "status": "skipped",
+                        "artist": artist,
+                        "title": title,
+                        "release_id": normalized_release_id,
+                        "message": "Release already exists in selected folder (cached)",
+                    }
+                )
+                continue
+
             if entry_album_key in pending_album_keys:
                 results.append(
                     {
@@ -244,12 +275,35 @@ def import_entries():
                 )
                 continue
 
+            if is_album_in_collection_cache(
+                user.username,
+                folder_id,
+                entry_album_key,
+            ):
+                results.append(
+                    {
+                        "id": entry_id,
+                        "status": "skipped",
+                        "artist": artist,
+                        "title": title,
+                        "release_id": normalized_release_id,
+                        "message": "A matching album already exists in selected folder (cached)",
+                    }
+                )
+                continue
+
             try:
                 add_release_to_folder(
                     d, user.username, folder_id, normalized_release_id
                 )
                 pending_release_ids.add(normalized_release_id)
                 pending_album_keys.add(entry_album_key)
+                cache_collection_membership_entry(
+                    user.username,
+                    folder_id,
+                    normalized_release_id,
+                    entry_album_key,
+                )
                 results.append(
                     {
                         "id": entry_id,
@@ -261,6 +315,12 @@ def import_entries():
                 )
             except HTTPError as e:
                 if is_discogs_duplicate_error(e):
+                    cache_collection_membership_entry(
+                        user.username,
+                        folder_id,
+                        normalized_release_id,
+                        entry_album_key,
+                    )
                     results.append(
                         {
                             "id": entry_id,
