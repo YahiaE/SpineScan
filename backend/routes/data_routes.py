@@ -7,7 +7,6 @@ from config import (
     DELETE_CAPTURE_AFTER_PROCESS,
 )
 from ocr_functions.process_image import main as process_image_main
-from ocr_functions.reader import main as ocr_main
 from services.storage_service import (
     build_capture_checksum,
     build_capture_object_key,
@@ -35,6 +34,22 @@ from services.discogs_service import (
 )
 
 data_bp = Blueprint("data", __name__)
+
+
+def _read_verified_capture_bytes(record):
+    """Verify the signed manifest before reading bytes so routes share one trust path."""
+    is_valid_signature = verify_capture_signature(
+        user_scope=record.get("user_scope"),
+        object_key=record.get("object_key"),
+        checksum=record.get("checksum_sha256"),
+        signature=record.get("signature"),
+    )
+    if not is_valid_signature:
+        raise PermissionError("Capture ownership signature is invalid")
+
+    file_bytes = download_capture_from_bucket(record.get("object_key"))
+    suffix = os.path.splitext(record.get("object_key"))[1] or ".jpg"
+    return file_bytes, suffix
 
 
 @data_bp.route("/data/capture-debug", methods=["GET"])
@@ -125,7 +140,7 @@ def scan_image():
 
     if os.path.isfile(path):
         try:
-            albums = ocr_main(path)
+            albums = process_image_main(path)
             return {"albums": albums}
         except Exception as e:
             return {"error": str(e)}, 500
@@ -139,23 +154,15 @@ def scan_image():
     if not record:
         return {"error": "Capture not found for this user"}, 404
 
-    is_valid_signature = verify_capture_signature(
-        user_scope=record.get("user_scope"),
-        object_key=record.get("object_key"),
-        checksum=record.get("checksum_sha256"),
-        signature=record.get("signature"),
-    )
-    if not is_valid_signature:
-        return {"error": "Capture ownership signature is invalid"}, 403
-
     try:
-        file_bytes = download_capture_from_bucket(record.get("object_key"))
+        file_bytes, suffix = _read_verified_capture_bytes(record)
+    except PermissionError as error:
+        return {"error": str(error)}, 403
     except Exception:
         return {"error": "File not found"}, 404
 
-    suffix = os.path.splitext(record.get("object_key"))[1] or ".jpg"
     try:
-        albums = with_temp_file_from_bytes(file_bytes, suffix, ocr_main)
+        albums = with_temp_file_from_bytes(file_bytes, suffix, process_image_main)
         return {"albums": albums}
     except Exception as e:
         return {"error": str(e)}, 500
@@ -229,21 +236,13 @@ def process_latest_image():
         }
 
     latest_image_key = latest_capture.get("object_key")
-    is_valid_signature = verify_capture_signature(
-        user_scope=latest_capture.get("user_scope"),
-        object_key=latest_capture.get("object_key"),
-        checksum=latest_capture.get("checksum_sha256"),
-        signature=latest_capture.get("signature"),
-    )
-    if not is_valid_signature:
-        return {"error": "Capture ownership signature is invalid"}, 403
-
     try:
-        file_bytes = download_capture_from_bucket(latest_image_key)
+        file_bytes, suffix = _read_verified_capture_bytes(latest_capture)
+    except PermissionError as error:
+        return {"error": str(error)}, 403
     except Exception:
         return {"error": "Image file not found or has expired"}, 404
 
-    suffix = os.path.splitext(latest_image_key)[1] or ".jpg"
     try:
         result = with_temp_file_from_bytes(file_bytes, suffix, process_image_main)
 
