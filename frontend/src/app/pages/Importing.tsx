@@ -5,6 +5,8 @@ import { CheckCircle2, Disc3, AlertCircle, SkipForward } from "lucide-react";
 import { motion } from "motion/react";
 
 const API_BASE = "/api";
+const IMPORT_REQUEST_TIMEOUT_MS = 120000;
+const FINALIZE_REQUEST_TIMEOUT_MS = 15000;
 
 type ImportResponse = {
   folder_id: number;
@@ -26,8 +28,10 @@ export function Importing() {
   const {
     scannedAlbums,
     addHistory,
+    capturedImage,
     selectedCollectionId,
     collectionFolders,
+    setCapturedImage,
     setLastImportSummary,
   } = useAppContext();
   const [results, setResults] = useState<
@@ -51,21 +55,59 @@ export function Importing() {
     let cancelled = false;
 
     const runImport = async () => {
+      const cleanupPayload = capturedImage ? { path: capturedImage } : {};
+
+      // Do not block the import flow on cleanup calls.
+      void (async () => {
+        const finalizeController = new AbortController();
+        const finalizeTimeoutId = window.setTimeout(
+          () => finalizeController.abort(),
+          FINALIZE_REQUEST_TIMEOUT_MS,
+        );
+
+        try {
+          await fetch(`${API_BASE}/data/capture/finalize`, {
+            method: "POST",
+            credentials: "include",
+            signal: finalizeController.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(cleanupPayload),
+          });
+        } catch {
+          // Best-effort cleanup should not block or fail imports.
+        } finally {
+          window.clearTimeout(finalizeTimeoutId);
+        }
+      })();
+      setCapturedImage(null);
+
       try {
-        const res = await fetch(`${API_BASE}/discogs/import`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            folder_id: selectedCollectionId,
-            entries: scannedAlbums.map((album) => ({
-              id: album.id,
-              artist: album.artist,
-              title: album.title,
-              release_id: album.validation?.releaseId,
-            })),
-          }),
-        });
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(
+          () => controller.abort(),
+          IMPORT_REQUEST_TIMEOUT_MS,
+        );
+
+        let res: Response;
+        try {
+          res = await fetch(`${API_BASE}/discogs/import`, {
+            method: "POST",
+            credentials: "include",
+            signal: controller.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              folder_id: selectedCollectionId,
+              entries: scannedAlbums.map((album) => ({
+                id: album.id,
+                artist: album.artist,
+                title: album.title,
+                release_id: album.validation?.releaseId,
+              })),
+            }),
+          });
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
 
         if (!res.ok) {
           const payload = await res.json().catch(() => null);
@@ -109,10 +151,15 @@ export function Importing() {
         }
       } catch (importError) {
         if (!cancelled) {
+          const isTimeoutError =
+            importError instanceof DOMException &&
+            importError.name === "AbortError";
           setError(
-            importError instanceof Error
-              ? importError.message
-              : "Import failed",
+            isTimeoutError
+              ? "Import timed out. Please retry; your folder cache warm-up may still be running in the background."
+              : importError instanceof Error
+                ? importError.message
+                : "Import failed",
           );
         }
       }
@@ -126,9 +173,11 @@ export function Importing() {
   }, [
     addHistory,
     collectionFolders,
+    capturedImage,
     navigate,
     scannedAlbums,
     selectedCollectionId,
+    setCapturedImage,
     setLastImportSummary,
   ]);
 

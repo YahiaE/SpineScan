@@ -8,7 +8,7 @@ const API_BASE = "/api";
 
 export function Processing() {
   const navigate = useNavigate();
-  const { setScannedAlbums } = useAppContext();
+  const { capturedImage, setScannedAlbums } = useAppContext();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -16,7 +16,11 @@ export function Processing() {
 
     const run = async () => {
       try {
-        const res = await fetch(`${API_BASE}/process/latest`, {
+        const processUrl = capturedImage
+          ? `${API_BASE}/process/latest?path=${encodeURIComponent(capturedImage)}`
+          : `${API_BASE}/process/latest`;
+
+        const res = await fetch(processUrl, {
           method: "GET",
           credentials: "include",
         });
@@ -76,7 +80,7 @@ export function Processing() {
     return () => {
       cancelled = true;
     };
-  }, [navigate, setScannedAlbums]);
+  }, [capturedImage, navigate, setScannedAlbums]);
 
   if (error) {
     return (
