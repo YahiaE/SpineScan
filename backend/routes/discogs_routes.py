@@ -20,6 +20,7 @@ from services.discogs_service import (
     is_album_in_collection_cache,
     is_discogs_duplicate_error,
     is_release_in_collection_cache,
+    mirror_collection_cache_entry_to_albums,
     resolve_release_match,
 )
 
@@ -250,6 +251,10 @@ def import_entries():
                 folder_id,
                 normalized_release_id,
             ):
+                mirror_collection_cache_entry_to_albums(
+                    normalized_release_id,
+                    entry_album_key,
+                )
                 results.append(
                     {
                         "id": entry_id,
@@ -280,6 +285,10 @@ def import_entries():
                 folder_id,
                 entry_album_key,
             ):
+                mirror_collection_cache_entry_to_albums(
+                    normalized_release_id,
+                    entry_album_key,
+                )
                 results.append(
                     {
                         "id": entry_id,

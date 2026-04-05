@@ -214,6 +214,11 @@ def normalize_text(value):
     return " ".join(normalized.split()).strip()
 
 
+def compact_identity_text(value):
+    """Normalize album identity strings and remove spaces for canonical keys."""
+    return normalize_text(value).replace(" ", "")
+
+
 def strip_version_suffix(value):
     """Remove common version suffixes that should not invalidate a match."""
     text = str(value or "")
@@ -529,15 +534,143 @@ def _collection_durable_marker_key(discogs_username, folder_id):
     )
 
 
+def _collection_albums_marker_key(discogs_username, folder_id):
+    return (
+        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
+        f"{discogs_username}:{int(folder_id)}:albums_mirrored"
+    )
+
+
 def _set_collection_cache_expiry(discogs_username, folder_id):
     release_key = _collection_release_cache_key(discogs_username, folder_id)
     album_key = _collection_album_cache_key(discogs_username, folder_id)
     warm_marker_key = _collection_warm_marker_key(discogs_username, folder_id)
     durable_marker_key = _collection_durable_marker_key(discogs_username, folder_id)
+    albums_marker_key = _collection_albums_marker_key(discogs_username, folder_id)
     redis_conn.expire(release_key, COLLECTION_CACHE_TTL_SECONDS)
     redis_conn.expire(album_key, COLLECTION_CACHE_TTL_SECONDS)
     redis_conn.expire(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS)
     redis_conn.expire(durable_marker_key, COLLECTION_CACHE_TTL_SECONDS)
+    redis_conn.expire(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS)
+
+
+def _upsert_albums_from_collection_cache(rows_by_key):
+    """Mirror unique cached collection entries into the albums lookup table."""
+    if not rows_by_key:
+        return
+
+    release_ids = []
+    for row in rows_by_key.values():
+        release_id = row.get("discogs_release_id")
+        if release_id is not None:
+            release_ids.append(int(release_id))
+
+    existing_rows = []
+    existing_rows_by_release = {}
+    if release_ids:
+        try:
+            response = (
+                supabase.table("albums")
+                .select("artist, album, normalized_key, discogs_release_id")
+                .in_("discogs_release_id", sorted(set(release_ids)))
+                .execute()
+            )
+            existing_rows = getattr(response, "data", None) or []
+            existing_rows_by_release = {
+                int(row["discogs_release_id"]): row
+                for row in existing_rows
+                if row.get("discogs_release_id") is not None
+            }
+        except Exception as error:
+            print(f"Failed to read existing albums for collection mirror: {error}")
+
+    desired_keys_by_release = {}
+    resolved_rows_by_key = {}
+    for row in rows_by_key.values():
+        release_id = row.get("discogs_release_id")
+        existing_row = None
+        if release_id is not None:
+            normalized_release_id = int(release_id)
+            desired_keys_by_release[normalized_release_id] = row.get("normalized_key")
+            existing_row = existing_rows_by_release.get(normalized_release_id)
+
+        if existing_row:
+            resolved_row = {
+                "artist": existing_row.get("artist") or row.get("artist"),
+                "album": existing_row.get("album") or row.get("album"),
+                "normalized_key": row.get("normalized_key"),
+                "discogs_release_id": int(release_id),
+                "updated_at": row.get("updated_at") or utc_timestamp(),
+            }
+        else:
+            resolved_row = row
+
+        resolved_rows_by_key[resolved_row["normalized_key"]] = resolved_row
+
+    try:
+        (
+            supabase.table("albums")
+            .upsert(
+                list(resolved_rows_by_key.values()),
+                on_conflict="normalized_key",
+            )
+            .execute()
+        )
+    except Exception as error:
+        print(f"Failed to mirror collection cache into albums table: {error}")
+        return
+
+    stale_keys = []
+    for existing_row in existing_rows:
+        release_id = existing_row.get("discogs_release_id")
+        if release_id is None:
+            continue
+
+        desired_key = desired_keys_by_release.get(int(release_id))
+        existing_key = existing_row.get("normalized_key")
+        if desired_key and existing_key and existing_key != desired_key:
+            stale_keys.append(existing_key)
+
+    for stale_key in sorted(set(stale_keys)):
+        try:
+            supabase.table("albums").delete().eq("normalized_key", stale_key).execute()
+        except Exception as error:
+            print(f"Failed to delete stale albums key {stale_key}: {error}")
+
+
+def _mirror_albums_from_durable_collection_cache(discogs_username, folder_id):
+    """Hydrate albums table from durable collection cache rows."""
+    try:
+        response = (
+            supabase.table("discogs_collection_cache")
+            .select("album_key, release_id, last_seen_at")
+            .eq("discogs_username", discogs_username)
+            .eq("folder_id", int(folder_id))
+            .limit(5000)
+            .execute()
+        )
+    except Exception as error:
+        print(f"Failed to read durable collection cache for albums mirror: {error}")
+        return
+
+    rows = getattr(response, "data", None) or []
+    album_rows_by_key = {}
+    for row in rows:
+        album_key = str(row.get("album_key") or "").strip()
+        release_id = row.get("release_id")
+        if not album_key or "::" not in album_key or release_id is None:
+            continue
+
+        artist_key, title_key = album_key.split("::", 1)
+        album_rows_by_key[album_key] = {
+            "artist": artist_key,
+            "album": title_key,
+            "normalized_key": album_key,
+            "discogs_release_id": int(release_id),
+            "updated_at": row.get("last_seen_at") or utc_timestamp(),
+        }
+
+    _upsert_albums_from_collection_cache(album_rows_by_key)
 
 
 def ensure_collection_membership_cache_warm(client, discogs_username, folder):
@@ -547,22 +680,28 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
     album_set_key = _collection_album_cache_key(discogs_username, folder_id)
     warm_marker_key = _collection_warm_marker_key(discogs_username, folder_id)
     durable_marker_key = _collection_durable_marker_key(discogs_username, folder_id)
+    albums_marker_key = _collection_albums_marker_key(discogs_username, folder_id)
 
     warm_marker_exists = bool(redis_conn.get(warm_marker_key))
     durable_marker_exists = bool(redis_conn.get(durable_marker_key))
 
     if warm_marker_exists and durable_marker_exists:
+        _mirror_albums_from_durable_collection_cache(discogs_username, folder_id)
+        redis_conn.setex(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
         return
 
     release_count = redis_conn.scard(release_set_key)
     album_count = redis_conn.scard(album_set_key)
     if (release_count > 0 or album_count > 0) and durable_marker_exists:
+        _mirror_albums_from_durable_collection_cache(discogs_username, folder_id)
+        redis_conn.setex(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
         redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
         _set_collection_cache_expiry(discogs_username, folder_id)
         return
 
     warmed_entries = 0
     durable_rows_by_release = {}
+    album_rows_by_key = {}
     for item in iter_discogs_paginated_items(
         folder.releases,
         authenticated=True,
@@ -590,6 +729,13 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
             "album_key": serialized_album_key,
             "last_seen_at": utc_timestamp(),
         }
+        album_rows_by_key[serialized_album_key] = {
+            "artist": release_artist_name or album_key[0],
+            "album": release_title or album_key[1],
+            "normalized_key": serialized_album_key,
+            "discogs_release_id": int(release_id),
+            "updated_at": utc_timestamp(),
+        }
         warmed_entries += 1
 
     durable_rows = list(durable_rows_by_release.values())
@@ -607,6 +753,9 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
             redis_conn.setex(durable_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
         except Exception as error:
             print(f"Failed to backfill durable collection cache: {error}")
+
+    _upsert_albums_from_collection_cache(album_rows_by_key)
+    redis_conn.setex(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
 
     redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
     _set_collection_cache_expiry(discogs_username, folder_id)
@@ -655,6 +804,35 @@ def cache_collection_membership_entry(
         )
     except Exception as error:
         print(f"Failed to persist collection cache entry: {error}")
+
+    _upsert_albums_from_collection_cache(
+        {
+            serialized_album_key: {
+                "artist": album_key[0],
+                "album": album_key[1],
+                "normalized_key": serialized_album_key,
+                "discogs_release_id": normalized_release_id,
+                "updated_at": utc_timestamp(),
+            }
+        }
+    )
+
+
+def mirror_collection_cache_entry_to_albums(release_id, album_key):
+    """Ensure one cached collection entry is present in albums."""
+    normalized_release_id = int(release_id)
+    serialized_album_key = serialize_album_identity_key(album_key)
+    _upsert_albums_from_collection_cache(
+        {
+            serialized_album_key: {
+                "artist": album_key[0],
+                "album": album_key[1],
+                "normalized_key": serialized_album_key,
+                "discogs_release_id": normalized_release_id,
+                "updated_at": utc_timestamp(),
+            }
+        }
+    )
 
 
 def is_release_in_collection_cache(discogs_username, folder_id, release_id):
@@ -766,10 +944,10 @@ def build_import_request_fingerprint(folder_id, entries):
 
 
 def album_identity_key(artist, title):
-    """Build a normalized key for a logical album regardless of release variant."""
+    """Build a normalized no-space key for a logical album identity."""
     return (
-        normalize_text(primary_artist_name(artist)),
-        strip_version_suffix(title),
+        compact_identity_text(primary_artist_name(artist)),
+        compact_identity_text(strip_version_suffix(title)),
     )
 
 
