@@ -3,12 +3,13 @@ import { useNavigate } from "react-router";
 import { ScanSearch, AlertCircle } from "lucide-react";
 import { motion } from "motion/react";
 import { useAppContext } from "../store";
+import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
 
 export function Processing() {
   const navigate = useNavigate();
-  const { capturedImage, setScannedAlbums } = useAppContext();
+  const { capturedImage, setCapturedImage, setScannedAlbums } = useAppContext();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -20,9 +21,8 @@ export function Processing() {
           ? `${API_BASE}/process/latest?path=${encodeURIComponent(capturedImage)}`
           : `${API_BASE}/process/latest`;
 
-        const res = await fetch(processUrl, {
+        const res = await apiFetch(processUrl, {
           method: "GET",
-          credentials: "include",
         });
 
         if (cancelled) return;
@@ -43,6 +43,11 @@ export function Processing() {
               : "";
 
         if (!resultText.trim()) {
+          await apiFetch(`${API_BASE}/data/capture/finalize`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: capturedImage ?? undefined }),
+          }).catch(() => {});
           throw new Error(
             "No OCR text was returned. Try taking a clearer photo and run again.",
           );
@@ -62,6 +67,11 @@ export function Processing() {
           });
 
         if (parsed.length === 0) {
+          await apiFetch(`${API_BASE}/data/capture/finalize`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: capturedImage ?? undefined }),
+          }).catch(() => {});
           throw new Error(
             "OCR returned no valid 'Artist - Album' lines. Please retake the image.",
           );
@@ -88,7 +98,10 @@ export function Processing() {
         <AlertCircle className="w-12 h-12 text-red-400" />
         <p className="text-white font-medium">{error}</p>
         <button
-          onClick={() => navigate("/scan")}
+          onClick={() => {
+            setCapturedImage(null);
+            navigate("/scan");
+          }}
           className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl transition-colors"
         >
           Try again
