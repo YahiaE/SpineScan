@@ -3,6 +3,7 @@ import json
 import os
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
@@ -27,22 +28,50 @@ from config import (
     DISCOGS_COLLECTION_WARM_MAX_PAGES,
     DISCOGS_AUTH_REQUEST_LIMIT,
     DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE,
+    DISCOGS_LOOKUP_BREAKER_TTL_SECONDS,
     DISCOGS_LOOKUP_JOB_FUNC,
     DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
     DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM,
+    DISCOGS_LOOKUP_MAX_QUEUE_DEPTH,
     DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY,
+    DISCOGS_LOOKUP_MAX_STARTED_JOBS,
     DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES,
+    DISCOGS_LOOKUP_429_BREAK_THRESHOLD,
+    DISCOGS_LOOKUP_SYNC_FAILURE_THRESHOLD,
     DISCOGS_MAX_RETRIES,
     DISCOGS_RATE_WINDOW_SECONDS,
+    DISCOGS_SYNC_LOOKUP_ENABLED,
+    DISCOGS_SYNC_LOOKUP_TIMEOUT_SECONDS,
     DISCOGS_UNAUTH_REQUEST_LIMIT,
 )
 from extensions import lookup_queue, redis_conn, supabase
+from services.discogs_account_service import (
+    get_linked_discogs_credentials,
+    resolve_supabase_user_id_from_request,
+)
+
+
+_sync_lookup_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def get_discogs_client():
     """Create an authenticated Discogs client from the current session."""
     access_token = session.get("access_token")
     access_token_secret = session.get("access_token_secret")
+
+    if not access_token or not access_token_secret:
+        supabase_user_id = resolve_supabase_user_id_from_request(optional=True)
+        if supabase_user_id:
+            linked_credentials = get_linked_discogs_credentials(supabase_user_id)
+            if linked_credentials:
+                access_token = linked_credentials.get("access_token")
+                access_token_secret = linked_credentials.get("access_token_secret")
+                session["access_token"] = access_token
+                session["access_token_secret"] = access_token_secret
+                if linked_credentials.get("discogs_username"):
+                    session["discogs_username"] = linked_credentials.get(
+                        "discogs_username"
+                    )
 
     if not access_token or not access_token_secret:
         raise ValueError("User not authenticated")
@@ -88,6 +117,57 @@ def get_discogs_rate_bucket_key(authenticated):
     return f"discogs:rate:{bucket_name}:{bucket_start}"
 
 
+def lookup_breaker_key():
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:breaker"
+
+
+def lookup_429_streak_key():
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:429-streak"
+
+
+def lookup_sync_failures_key():
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:sync-failures"
+
+
+def build_degraded_lookup_result(
+    message="Validation delayed. Please try again shortly.",
+):
+    return build_pending_lookup_result(message)
+
+
+def open_lookup_breaker(reason, ttl_seconds=DISCOGS_LOOKUP_BREAKER_TTL_SECONDS):
+    redis_conn.setex(lookup_breaker_key(), max(1, int(ttl_seconds)), reason)
+
+
+def get_lookup_breaker_reason():
+    return redis_conn.get(lookup_breaker_key())
+
+
+def is_lookup_breaker_open():
+    return bool(get_lookup_breaker_reason())
+
+
+def record_discogs_429():
+    streak = redis_conn.incr(lookup_429_streak_key())
+    if streak == 1:
+        redis_conn.expire(lookup_429_streak_key(), DISCOGS_RATE_WINDOW_SECONDS)
+
+    if streak >= DISCOGS_LOOKUP_429_BREAK_THRESHOLD:
+        open_lookup_breaker("discogs_429")
+
+
+def record_sync_lookup_failure():
+    failure_count = redis_conn.incr(lookup_sync_failures_key())
+    if failure_count == 1:
+        redis_conn.expire(
+            lookup_sync_failures_key(),
+            DISCOGS_LOOKUP_BREAKER_TTL_SECONDS,
+        )
+
+    if failure_count >= DISCOGS_LOOKUP_SYNC_FAILURE_THRESHOLD:
+        open_lookup_breaker("sync_lookup_failure")
+
+
 def acquire_discogs_rate_limit_slot(authenticated=True):
     """Block until a shared Discogs rate-limit slot is available."""
     limit = (
@@ -126,6 +206,8 @@ def call_discogs(api_call, authenticated=True):
             last_error = error
             if getattr(error, "status_code", None) != 429:
                 raise
+
+            record_discogs_429()
 
             if attempt == DISCOGS_MAX_RETRIES - 1:
                 raise
@@ -1173,8 +1255,41 @@ def get_lookup_queue_stats():
         "deferred_jobs": len(deferred_registry),
         "pending_markers": count_lookup_pending_markers(),
         "sync_fallback_active": len(workers) == 0,
+        "lookup_breaker_open": is_lookup_breaker_open(),
+        "lookup_breaker_reason": get_lookup_breaker_reason(),
         "timestamp": utc_timestamp(),
     }
+
+
+def is_lookup_queue_saturated():
+    try:
+        stats = get_lookup_queue_stats()
+    except Exception:
+        return False
+
+    if stats["queued_jobs"] >= DISCOGS_LOOKUP_MAX_QUEUE_DEPTH:
+        open_lookup_breaker("queue_depth")
+        return True
+
+    if stats["started_jobs"] >= DISCOGS_LOOKUP_MAX_STARTED_JOBS:
+        open_lookup_breaker("started_jobs")
+        return True
+
+    return False
+
+
+def run_sync_lookup_with_timeout(artist, title, normalized_key):
+    """Execute sync fallback in a worker thread so request path has a hard timeout."""
+    future = _sync_lookup_executor.submit(run_album_lookup_job, artist, title, normalized_key)
+
+    try:
+        timeout_seconds = max(0.5, float(DISCOGS_SYNC_LOOKUP_TIMEOUT_SECONDS))
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError as error:
+        future.cancel()
+        raise TimeoutError(
+            f"Synchronous lookup timed out after {timeout_seconds:.1f}s"
+        ) from error
 
 
 def resolve_release_match(artist, title, enqueue_if_missing=True):
@@ -1201,24 +1316,35 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
     if not enqueue_if_missing:
         return build_pending_lookup_result("Validation has not completed yet")
 
-    if not has_lookup_worker_available():
+    if is_lookup_breaker_open():
+        return build_degraded_lookup_result()
+
+    worker_available = has_lookup_worker_available()
+    queue_saturated = is_lookup_queue_saturated()
+
+    if worker_available and not queue_saturated:
         try:
-            return run_album_lookup_job(artist, title, normalized_key)
-        except Exception as error:
-            return {
-                "status": "invalid",
-                "message": f"Discogs lookup failed without worker: {error}",
-            }
+            enqueue_album_lookup_job(artist, title, normalized_key)
+        except Exception:
+            record_sync_lookup_failure()
+            open_lookup_breaker("queue_enqueue_failed")
+            return build_degraded_lookup_result()
+
+        return build_pending_lookup_result()
+
+    if worker_available and queue_saturated:
+        return build_degraded_lookup_result()
+
+    if not DISCOGS_SYNC_LOOKUP_ENABLED:
+        open_lookup_breaker("sync_lookup_disabled")
+        return build_degraded_lookup_result()
 
     try:
-        enqueue_album_lookup_job(artist, title, normalized_key)
-    except Exception as error:
-        return {
-            "status": "invalid",
-            "message": f"Failed to queue Discogs lookup: {error}",
-        }
-
-    return build_pending_lookup_result()
+        return run_sync_lookup_with_timeout(artist, title, normalized_key)
+    except Exception:
+        record_sync_lookup_failure()
+        open_lookup_breaker("sync_lookup_failed")
+        return build_degraded_lookup_result()
 
 
 def run_album_lookup_job(artist, title, normalized_key=None):
