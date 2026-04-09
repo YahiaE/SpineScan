@@ -110,3 +110,60 @@ Behavior summary:
 	scope and that signature matches before processing.
 - After successful process, capture status is updated to `processed` or
 	`deleted` depending on `DELETE_CAPTURE_AFTER_PROCESS`.
+
+## Monitoring setup
+
+The backend now exposes operations endpoints for uptime checks and metrics:
+
+- `GET /healthz`
+	Liveness probe. Returns `200` when the process is running.
+- `GET /readyz`
+	Readiness probe. Returns `200` only when Redis and Supabase checks pass,
+	otherwise returns `503` with check details.
+- `GET /metrics`
+	Prometheus-compatible metrics output (`text/plain; version=0.0.4`).
+
+Key metrics exported:
+
+- `spinescan_http_requests_total`
+- `spinescan_http_errors_5xx_total`
+- `spinescan_http_request_duration_seconds_p95`
+- `spinescan_discogs_api_calls_total`
+- `spinescan_discogs_api_429_total`
+- `spinescan_discogs_api_latency_p95_seconds`
+- `spinescan_lookup_workers_online`
+- `spinescan_lookup_queue_depth`
+- `spinescan_lookup_started_jobs`
+- `spinescan_lookup_breaker_open`
+
+Prometheus scrape example:
+
+```yaml
+scrape_configs:
+  - job_name: "spinescan-backend"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["192.168.1.146:5000"]
+```
+
+Recommended initial alerts:
+
+- backend down for 2 minutes (`/healthz` failing)
+- readiness degraded for 2 minutes (`/readyz` returns `503`)
+- HTTP 5xx spike
+- p95 request latency spike
+- lookup workers online equals `0` for 5 minutes
+- lookup queue depth above threshold for 10 minutes
+- Discogs 429 spike or lookup breaker open for 10 minutes
+
+## Frontend runtime monitoring
+
+Frontend runtime errors can be captured with Sentry. Configure in frontend env:
+
+```env
+VITE_SENTRY_DSN=https://examplePublicKey@o0.ingest.sentry.io/0
+VITE_SENTRY_TRACES_SAMPLE_RATE=0.1
+VITE_RELEASE=spinescan@local
+```
+
+When `VITE_SENTRY_DSN` is unset, Sentry initialization is skipped.

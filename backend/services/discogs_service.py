@@ -4,8 +4,10 @@ import os
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from collections import deque
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from threading import Lock
 
 import discogs_client
 from discogs_client.exceptions import HTTPError
@@ -52,6 +54,69 @@ from services.discogs_account_service import (
 
 
 _sync_lookup_executor = ThreadPoolExecutor(max_workers=2)
+_discogs_metrics_lock = Lock()
+_discogs_latencies = deque(maxlen=5000)
+_discogs_calls_total = 0
+_discogs_calls_authenticated_total = 0
+_discogs_calls_unauthenticated_total = 0
+_discogs_rate_limited_429_total = 0
+_discogs_errors_total = 0
+
+
+def _quantile(values, quantile):
+    if not values:
+        return 0.0
+
+    sorted_values = sorted(values)
+    index = int((len(sorted_values) - 1) * quantile)
+    index = max(0, min(index, len(sorted_values) - 1))
+    return float(sorted_values[index])
+
+
+def record_discogs_api_call(authenticated, duration_seconds, status_code):
+    global _discogs_calls_total
+    global _discogs_calls_authenticated_total
+    global _discogs_calls_unauthenticated_total
+    global _discogs_rate_limited_429_total
+    global _discogs_errors_total
+
+    with _discogs_metrics_lock:
+        _discogs_calls_total += 1
+        if authenticated:
+            _discogs_calls_authenticated_total += 1
+        else:
+            _discogs_calls_unauthenticated_total += 1
+
+        _discogs_latencies.append(float(duration_seconds))
+
+        if int(status_code) == 429:
+            _discogs_rate_limited_429_total += 1
+
+        if int(status_code) >= 400:
+            _discogs_errors_total += 1
+
+
+def get_discogs_call_metrics():
+    with _discogs_metrics_lock:
+        latencies = list(_discogs_latencies)
+        calls_total = _discogs_calls_total
+        calls_authenticated = _discogs_calls_authenticated_total
+        calls_unauthenticated = _discogs_calls_unauthenticated_total
+        rate_limited_429_total = _discogs_rate_limited_429_total
+        errors_total = _discogs_errors_total
+
+    avg_latency = (sum(latencies) / len(latencies)) if latencies else 0.0
+    p95_latency = _quantile(latencies, 0.95)
+
+    return {
+        "calls_total": calls_total,
+        "calls_authenticated_total": calls_authenticated,
+        "calls_unauthenticated_total": calls_unauthenticated,
+        "rate_limited_429_total": rate_limited_429_total,
+        "errors_total": errors_total,
+        "latency_avg_seconds": avg_latency,
+        "latency_p95_seconds": p95_latency,
+    }
 
 
 def get_discogs_client():
@@ -199,12 +264,25 @@ def call_discogs(api_call, authenticated=True):
 
     for attempt in range(DISCOGS_MAX_RETRIES):
         acquire_discogs_rate_limit_slot(authenticated=authenticated)
+        call_started_at = time.perf_counter()
 
         try:
-            return api_call()
+            result = api_call()
+            record_discogs_api_call(
+                authenticated=authenticated,
+                duration_seconds=time.perf_counter() - call_started_at,
+                status_code=200,
+            )
+            return result
         except HTTPError as error:
+            status_code = int(getattr(error, "status_code", 500) or 500)
+            record_discogs_api_call(
+                authenticated=authenticated,
+                duration_seconds=time.perf_counter() - call_started_at,
+                status_code=status_code,
+            )
             last_error = error
-            if getattr(error, "status_code", None) != 429:
+            if status_code != 429:
                 raise
 
             record_discogs_429()
@@ -213,6 +291,13 @@ def call_discogs(api_call, authenticated=True):
                 raise
 
             time.sleep(min(2**attempt, 8))
+        except Exception:
+            record_discogs_api_call(
+                authenticated=authenticated,
+                duration_seconds=time.perf_counter() - call_started_at,
+                status_code=500,
+            )
+            raise
 
     if last_error is not None:
         raise last_error
@@ -1280,7 +1365,9 @@ def is_lookup_queue_saturated():
 
 def run_sync_lookup_with_timeout(artist, title, normalized_key):
     """Execute sync fallback in a worker thread so request path has a hard timeout."""
-    future = _sync_lookup_executor.submit(run_album_lookup_job, artist, title, normalized_key)
+    future = _sync_lookup_executor.submit(
+        run_album_lookup_job, artist, title, normalized_key
+    )
 
     try:
         timeout_seconds = max(0.5, float(DISCOGS_SYNC_LOOKUP_TIMEOUT_SECONDS))
