@@ -23,8 +23,30 @@ from services.discogs_service import (
     mirror_collection_cache_entry_to_albums,
     resolve_release_match,
 )
+from services.import_history_service import (
+    create_import_history_entry,
+    list_import_history,
+)
 
 discogs_bp = Blueprint("discogs", __name__, url_prefix="/discogs")
+
+
+@discogs_bp.route("/import-history", methods=["GET"])
+def get_import_history():
+    try:
+        d = get_discogs_client()
+        user = get_discogs_identity(d)
+    except ValueError:
+        return jsonify({"error": "User not authenticated"}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    try:
+        history_rows = list_import_history(user.username)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"imports": history_rows})
 
 
 @discogs_bp.route("/collection-folders", methods=["GET"])
@@ -377,6 +399,20 @@ def import_entries():
             "skipped_count": skipped_count,
             "failed_count": failed_count,
         }
+
+        try:
+            create_import_history_entry(
+                discogs_username=user.username,
+                folder_id=folder_id,
+                folder_name=getattr(target_folder, "name", None),
+                status="completed" if failed_count == 0 else "completed_with_errors",
+                added_count=added_count,
+                skipped_count=skipped_count,
+                failed_count=failed_count,
+                results=results,
+            )
+        except Exception as history_error:
+            print(f"Failed to persist import history: {history_error}")
 
         redis_conn.setex(
             import_result_key,
