@@ -3,7 +3,7 @@ services:
     name: spinescan-backend
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT backend.wsgi:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT wsgi:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
@@ -12,7 +12,7 @@ services:
     name: spinescan-worker
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m backend.worker
+    startCommand: python backend/worker.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
