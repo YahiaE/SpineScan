@@ -47,10 +47,6 @@ from config import (
     DISCOGS_UNAUTH_REQUEST_LIMIT,
 )
 from extensions import lookup_queue, redis_conn, supabase
-from services.discogs_account_service import (
-    get_linked_discogs_credentials,
-    resolve_supabase_user_id_from_request,
-)
 
 
 _sync_lookup_executor = ThreadPoolExecutor(max_workers=2)
@@ -123,20 +119,6 @@ def get_discogs_client():
     """Create an authenticated Discogs client from the current session."""
     access_token = session.get("access_token")
     access_token_secret = session.get("access_token_secret")
-
-    if not access_token or not access_token_secret:
-        supabase_user_id = resolve_supabase_user_id_from_request(optional=True)
-        if supabase_user_id:
-            linked_credentials = get_linked_discogs_credentials(supabase_user_id)
-            if linked_credentials:
-                access_token = linked_credentials.get("access_token")
-                access_token_secret = linked_credentials.get("access_token_secret")
-                session["access_token"] = access_token
-                session["access_token_secret"] = access_token_secret
-                if linked_credentials.get("discogs_username"):
-                    session["discogs_username"] = linked_credentials.get(
-                        "discogs_username"
-                    )
 
     if not access_token or not access_token_secret:
         raise ValueError("User not authenticated")
