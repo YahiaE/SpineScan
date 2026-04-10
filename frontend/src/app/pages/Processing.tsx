@@ -55,7 +55,12 @@ export function Processing() {
 
         const parsed = resultText
           .split(/\r?\n/)
-          .filter((entry: string) => entry.includes(" - "))
+          .filter((entry: string) => {
+            if (!entry.includes(" - ")) return false;
+            // Reject prose lines (sentences masquerading as Artist - Album)
+            const wordCount = entry.trim().split(/\s+/).length;
+            return wordCount <= 12;
+          })
           .map((entry: string, i: number) => {
             const sep = entry.indexOf(" - ");
             return {

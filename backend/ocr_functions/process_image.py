@@ -85,4 +85,10 @@ No explanations, scores, or metadata.
         ],
     )
 
-    return response.text
+    raw = response.text or ""
+    lines = [
+        line.strip()
+        for line in raw.splitlines()
+        if " - " in line and len(line.strip().split()) <= 12
+    ]
+    return "\n".join(lines)
