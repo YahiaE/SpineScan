@@ -3,6 +3,7 @@ import { Disc3, CheckCircle2, ExternalLink } from "lucide-react";
 import { useAppContext } from "../store";
 import { motion } from "motion/react";
 import { useState } from "react";
+import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
 const EXCHANGE_RETRY_COUNT = 8;
@@ -23,8 +24,8 @@ export function Welcome() {
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/auth/request_token`, {
-        credentials: "include",
+      const res = await apiFetch(`${API_BASE}/auth/request_token`, {
+
       });
       if (!res.ok) throw new Error("Failed to get request token");
       const { authorize_url, oauth_token } = await res.json();
@@ -63,10 +64,10 @@ export function Welcome() {
       let payload: { error?: string } | null = null;
 
       for (let attempt = 0; attempt < EXCHANGE_RETRY_COUNT; attempt += 1) {
-        res = await fetch(
+        res = await apiFetch(
           `${API_BASE}/auth/access_token?oauth_token=${encodeURIComponent(oauthToken)}`,
           {
-            credentials: "include",
+
           },
         );
 

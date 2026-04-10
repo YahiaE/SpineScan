@@ -10,6 +10,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
 
@@ -83,9 +84,9 @@ export function Review() {
     }
 
     try {
-      const res = await fetch(`${API_BASE}/discogs/validate`, {
+      const res = await apiFetch(`${API_BASE}/discogs/validate`, {
         method: "POST",
-        credentials: "include",
+
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ entries: albumsToValidate }),
       });
@@ -116,8 +117,8 @@ export function Review() {
       setFolderError(null);
 
       try {
-        const res = await fetch(`${API_BASE}/discogs/collection-folders`, {
-          credentials: "include",
+        const res = await apiFetch(`${API_BASE}/discogs/collection-folders`, {
+
         });
 
         if (!res.ok) {

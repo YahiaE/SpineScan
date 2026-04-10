@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { useAppContext } from "../store";
 import { CheckCircle2, Disc3, AlertCircle, SkipForward } from "lucide-react";
 import { motion } from "motion/react";
+import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
 const IMPORT_REQUEST_TIMEOUT_MS = 120000;
@@ -66,9 +67,9 @@ export function Importing() {
         );
 
         try {
-          await fetch(`${API_BASE}/data/capture/finalize`, {
+          await apiFetch(`${API_BASE}/data/capture/finalize`, {
             method: "POST",
-            credentials: "include",
+
             signal: finalizeController.signal,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(cleanupPayload),
@@ -90,9 +91,9 @@ export function Importing() {
 
         let res: Response;
         try {
-          res = await fetch(`${API_BASE}/discogs/import`, {
+          res = await apiFetch(`${API_BASE}/discogs/import`, {
             method: "POST",
-            credentials: "include",
+
             signal: controller.signal,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({

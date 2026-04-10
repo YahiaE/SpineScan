@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { X, Check, CameraOff } from "lucide-react";
 import { useAppContext } from "../store";
+import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
 
@@ -90,9 +91,9 @@ export function Scan() {
       const form = new FormData();
       form.append("file", previewBlob, "scan.jpg");
 
-      const res = await fetch(`${API_BASE}/data/upload`, {
+      const res = await apiFetch(`${API_BASE}/data/upload`, {
         method: "POST",
-        credentials: "include",
+
         body: form,
       });
 
