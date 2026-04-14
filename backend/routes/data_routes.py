@@ -4,6 +4,7 @@ from flask import Blueprint, session, request
 
 from config import (
     ALLOWED_MIME,
+    MAX_UPLOAD_BYTES,
 )
 from ocr_functions.process_image import main as process_image_main
 from services.storage_service import (
@@ -22,6 +23,7 @@ from services.storage_service import (
     get_latest_capture_manifest_record_any,
     list_capture_objects_for_scope,
     mark_capture_manifest_status,
+    compress_upload_image,
     upload_capture_to_bucket,
     verify_uploaded_capture,
     verify_capture_signature,
@@ -164,22 +166,33 @@ def upload_image():
     if not file_bytes:
         return {"error": "Uploaded file is empty"}, 400
 
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        return {
+            "error": "Uploaded file is too large",
+            "max_upload_bytes": MAX_UPLOAD_BYTES,
+        }, 413
+
+    try:
+        compressed_bytes, content_type, suffix = compress_upload_image(file_bytes)
+    except Exception as compression_error:
+        return {"error": f"Failed to compress upload: {compression_error}"}, 400
+
     user_scope = build_capture_user_scope(
         access_token,
         session.get("discogs_username"),
     )
-    object_key = build_capture_object_key(user_scope, file_bytes, suffix)
-    checksum = build_capture_checksum(file_bytes)
+    object_key = build_capture_object_key(user_scope, compressed_bytes, suffix)
+    checksum = build_capture_checksum(compressed_bytes)
     signature = build_capture_signature(user_scope, object_key, checksum)
 
     try:
-        upload_capture_to_bucket(object_key, file_bytes, file.mimetype)
+        upload_capture_to_bucket(object_key, compressed_bytes, content_type)
         verify_uploaded_capture(object_key, checksum)
 
         create_capture_manifest_record(
             user_scope=user_scope,
             object_key=object_key,
-            content_type=file.mimetype,
+            content_type=content_type,
             checksum=checksum,
             signature=signature,
         )

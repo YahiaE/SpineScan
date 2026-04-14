@@ -3,8 +3,16 @@ import hmac
 import os
 import tempfile
 import time
+from io import BytesIO
 
-from config import CAPTURE_SIGNATURE_SECRET, SUPABASE_UPLOAD_BUCKET
+from PIL import Image, ImageOps
+
+from config import (
+    CAPTURE_SIGNATURE_SECRET,
+    SUPABASE_UPLOAD_BUCKET,
+    UPLOAD_COMPRESS_MAX_DIMENSION,
+    UPLOAD_JPEG_QUALITY,
+)
 from extensions import supabase
 
 
@@ -57,6 +65,29 @@ def upload_capture_to_bucket(object_key, file_bytes, content_type):
             "upsert": False,
         },
     )
+
+
+def compress_upload_image(file_bytes):
+    """Compress an uploaded image to a bounded JPEG for consistent storage costs."""
+    with Image.open(BytesIO(file_bytes)) as image:
+        image = ImageOps.exif_transpose(image)
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+
+        max_dimension = max(256, int(UPLOAD_COMPRESS_MAX_DIMENSION))
+        image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+
+        out = BytesIO()
+        jpeg_quality = max(50, min(95, int(UPLOAD_JPEG_QUALITY)))
+        image.save(
+            out,
+            format="JPEG",
+            quality=jpeg_quality,
+            optimize=True,
+            progressive=True,
+        )
+
+    return out.getvalue(), "image/jpeg", ".jpg"
 
 
 def download_capture_from_bucket(object_key):

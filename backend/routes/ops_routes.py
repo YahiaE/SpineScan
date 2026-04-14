@@ -1,5 +1,8 @@
-from flask import Blueprint, Response, jsonify
+from functools import wraps
 
+from flask import Blueprint, Response, jsonify, request
+
+from config import OPS_API_KEY
 from extensions import redis_conn, supabase
 from services.discogs_service import get_discogs_call_metrics, get_lookup_queue_stats
 from services.monitoring_service import get_http_metrics_snapshot
@@ -12,12 +15,28 @@ def _prometheus_escape(value):
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def require_ops_api_key(view_func):
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        if not OPS_API_KEY:
+            return view_func(*args, **kwargs)
+
+        provided_key = request.headers.get("X-Ops-Api-Key")
+        if provided_key != OPS_API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        return view_func(*args, **kwargs)
+
+    return wrapped
+
+
 @ops_bp.route("/healthz", methods=["GET"])
 def healthz():
     return jsonify({"status": "ok"}), 200
 
 
 @ops_bp.route("/readyz", methods=["GET"])
+@require_ops_api_key
 def readyz():
     checks = {
         "redis": False,
@@ -53,6 +72,7 @@ def readyz():
 
 
 @ops_bp.route("/metrics", methods=["GET"])
+@require_ops_api_key
 def metrics():
     http_metrics = get_http_metrics_snapshot()
     discogs_metrics = get_discogs_call_metrics()

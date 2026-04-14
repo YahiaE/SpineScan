@@ -19,9 +19,10 @@ CSRF_TRUSTED_ORIGINS = [
 CORS_ORIGINS = ["http://localhost:5173", "http://192.168.1.146:5173"]
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get(
-    "SUPABASE_SERVICE_ROLE_KEY"
-) or os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+if not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY must be set for backend startup")
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -97,6 +98,10 @@ DELETE_CAPTURE_AFTER_PROCESS = (
     os.getenv("DELETE_CAPTURE_AFTER_PROCESS", "true").strip().lower() == "true"
 )
 CAPTURE_SIGNATURE_SECRET = os.getenv("CAPTURE_SIGNATURE_SECRET") or FLASK_SECRET_KEY
+OPS_API_KEY = os.getenv("OPS_API_KEY")
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(8 * 1024 * 1024)))
+UPLOAD_COMPRESS_MAX_DIMENSION = int(os.getenv("UPLOAD_COMPRESS_MAX_DIMENSION", "2000"))
+UPLOAD_JPEG_QUALITY = int(os.getenv("UPLOAD_JPEG_QUALITY", "82"))
 
 DISCOGS_LOOKUP_JOB_FUNC = "main.run_album_lookup_job"
 

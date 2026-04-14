@@ -2,12 +2,14 @@ import time
 
 from flask import Flask, g, request, session
 from flask_cors import CORS
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from config import (
     CORS_ORIGINS,
     CSRF_ORIGIN_ENFORCEMENT,
     CSRF_TRUSTED_ORIGINS,
     FLASK_SECRET_KEY,
+    MAX_UPLOAD_BYTES,
     SESSION_COOKIE_SECURE,
 )
 from routes.auth_routes import auth_bp
@@ -32,7 +34,15 @@ def create_app():
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         PERMANENT_SESSION_LIFETIME=86400,
+        MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
     )
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def handle_request_too_large(_error):
+        return {
+            "error": "Uploaded file is too large",
+            "max_upload_bytes": MAX_UPLOAD_BYTES,
+        }, 413
 
     @app.before_request
     def before_request():
