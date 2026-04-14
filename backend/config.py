@@ -4,19 +4,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
+
+
+def _parse_csv_env(name, default=""):
+    raw_value = os.getenv(name, default)
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
 SESSION_COOKIE_SECURE = (
     os.getenv("SESSION_COOKIE_SECURE", "false").strip().lower() == "true"
 )
 CSRF_ORIGIN_ENFORCEMENT = (
     os.getenv("CSRF_ORIGIN_ENFORCEMENT", "false").strip().lower() == "true"
 )
-CSRF_TRUSTED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
-    if origin.strip()
-]
+CSRF_TRUSTED_ORIGINS = _parse_csv_env("CSRF_TRUSTED_ORIGINS")
 
-CORS_ORIGINS = ["http://localhost:5173", "http://192.168.1.146:5173"]
+CORS_ORIGINS = _parse_csv_env(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://192.168.1.146:5173",
+)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -24,6 +30,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 if not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY must be set for backend startup")
 
+REDIS_URL = os.getenv("REDIS_URL")
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 DISCOGS_LOOKUP_QUEUE = os.getenv("DISCOGS_LOOKUP_QUEUE", "discogs-lookups")

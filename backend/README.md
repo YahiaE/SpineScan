@@ -167,3 +167,23 @@ VITE_RELEASE=spinescan@local
 ```
 
 When `VITE_SENTRY_DSN` is unset, Sentry initialization is skipped.
+
+## Production env checklist
+
+For Render or any production deployment, set these backend env vars explicitly:
+
+```env
+CORS_ORIGINS=https://your-frontend-origin.example
+CSRF_ORIGIN_ENFORCEMENT=true
+CSRF_TRUSTED_ORIGINS=https://your-frontend-origin.example
+REDIS_URL=redis://<your-redis-host>:6379
+OPS_API_KEY=replace-with-strong-random-secret
+CAPTURE_SIGNATURE_SECRET=replace-with-different-strong-random-secret
+```
+
+Notes:
+
+- `CORS_ORIGINS` is now read from env and supports comma-separated values.
+- `CSRF_TRUSTED_ORIGINS` is also comma-separated and should usually match your frontend origin list.
+- `REDIS_URL` takes precedence over `REDIS_HOST` and `REDIS_PORT`.
+- Keep `SESSION_COOKIE_SECURE=true` in production.
