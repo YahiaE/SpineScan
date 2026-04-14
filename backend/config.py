@@ -4,6 +4,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
+SESSION_COOKIE_SECURE = (
+    os.getenv("SESSION_COOKIE_SECURE", "false").strip().lower() == "true"
+)
+CSRF_ORIGIN_ENFORCEMENT = (
+    os.getenv("CSRF_ORIGIN_ENFORCEMENT", "false").strip().lower() == "true"
+)
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+]
 
 CORS_ORIGINS = ["http://localhost:5173", "http://192.168.1.146:5173"]
 

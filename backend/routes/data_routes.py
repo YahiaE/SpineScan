@@ -199,18 +199,11 @@ def scan_image():
     if not body or "path" not in body:
         return {"error": "Missing 'path' in request body"}, 400
 
-    path = body["path"]
-
-    if os.path.isfile(path):
-        try:
-            albums = process_image_main(path)
-            return {"albums": albums}
-        except Exception as e:
-            return {"error": str(e)}, 500
-
     access_token = session.get("access_token")
     if not access_token:
         return {"error": "User not authenticated"}, 401
+
+    path = body["path"]
 
     scope_candidates = _capture_scope_candidates(access_token)
     record = None

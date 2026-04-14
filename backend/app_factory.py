@@ -3,7 +3,13 @@ import time
 from flask import Flask, g, request, session
 from flask_cors import CORS
 
-from config import CORS_ORIGINS, FLASK_SECRET_KEY
+from config import (
+    CORS_ORIGINS,
+    CSRF_ORIGIN_ENFORCEMENT,
+    CSRF_TRUSTED_ORIGINS,
+    FLASK_SECRET_KEY,
+    SESSION_COOKIE_SECURE,
+)
 from routes.auth_routes import auth_bp
 from routes.data_routes import data_bp
 from routes.discogs_routes import discogs_bp
@@ -22,7 +28,7 @@ def create_app():
     )
 
     app.config.update(
-        SESSION_COOKIE_SECURE=False,
+        SESSION_COOKIE_SECURE=SESSION_COOKIE_SECURE,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         PERMANENT_SESSION_LIFETIME=86400,
@@ -30,6 +36,17 @@ def create_app():
 
     @app.before_request
     def before_request():
+        if CSRF_ORIGIN_ENFORCEMENT and request.method in {
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+        }:
+            trusted_origins = set(CORS_ORIGINS) | set(CSRF_TRUSTED_ORIGINS)
+            request_origin = request.headers.get("Origin") or ""
+            if request_origin and request_origin not in trusted_origins:
+                return {"error": "Blocked by origin policy"}, 403
+
         session.permanent = True
         g.request_started_at = time.perf_counter()
 

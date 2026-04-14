@@ -35,7 +35,6 @@ def get_request_token():
             {
                 "authorize_url": url,
                 "oauth_token": request_token,
-                "oauth_token_secret": request_token_secret,
             }
         )
     except HTTPError as e:
@@ -87,8 +86,8 @@ def exchange_access_token():
 
         return jsonify(
             {
-                "access_token": access_token,
-                "access_token_secret": access_token_secret,
+                "authorized": True,
+                "discogs_username": getattr(identity, "username", None),
             }
         )
     except Exception as e:
