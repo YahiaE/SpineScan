@@ -50,7 +50,30 @@ def callback():
     if redis_conn.hgetall(oauth_token):
         redis_conn.hset(oauth_token, "oauth_verifier", oauth_verifier)
 
-    return jsonify({"ok": True, "oauth_token": oauth_token})
+    # Do not expose oauth_token in the browser response; the server-side session/Redis state is enough.
+    html = """
+<!doctype html>
+<html>
+    <head>
+        <meta charset=\"utf-8\" />
+        <title>Authorization Complete</title>
+    </head>
+    <body>
+        <script>
+            if (window.opener && !window.opener.closed) {
+                window.opener.postMessage({ type: "discogs_oauth_complete" }, "*");
+            }
+            window.close();
+        </script>
+        <p>Authorization complete. You can close this window.</p>
+    </body>
+</html>
+"""
+    return (
+        html,
+        200,
+        {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
+    )
 
 
 @auth_bp.route("/access_token", methods=["GET"])
