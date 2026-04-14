@@ -13,6 +13,22 @@ export function Layout() {
   const homeBackPaths = new Set(["/review", "/confirm", "/importing"]);
 
   const handleBack = async () => {
+    if (location.pathname === "/processing") {
+      try {
+        await fetch(`${API_BASE}/data/capture/finalize`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(capturedImage ? { path: capturedImage } : {}),
+        });
+      } catch {
+        // Best-effort cleanup should never block user navigation.
+      }
+      setCapturedImage(null);
+      navigate("/scan", { replace: true });
+      return;
+    }
+
     if (homeBackPaths.has(location.pathname)) {
       try {
         await fetch(`${API_BASE}/data/capture/finalize`, {

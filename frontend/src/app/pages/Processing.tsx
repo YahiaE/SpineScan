@@ -16,10 +16,13 @@ export function Processing() {
     let cancelled = false;
 
     const run = async () => {
+      if (!capturedImage) {
+        navigate("/scan", { replace: true });
+        return;
+      }
+
       try {
-        const processUrl = capturedImage
-          ? `${API_BASE}/process/latest?path=${encodeURIComponent(capturedImage)}`
-          : `${API_BASE}/process/latest`;
+        const processUrl = `${API_BASE}/process/latest?path=${encodeURIComponent(capturedImage)}`;
 
         const res = await apiFetch(processUrl, {
           method: "GET",
@@ -48,6 +51,7 @@ export function Processing() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path: capturedImage ?? undefined }),
           }).catch(() => {});
+          setCapturedImage(null);
           throw new Error(
             "No OCR text was returned. Try taking a clearer photo and run again.",
           );
@@ -77,6 +81,7 @@ export function Processing() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path: capturedImage ?? undefined }),
           }).catch(() => {});
+          setCapturedImage(null);
           throw new Error(
             "OCR returned no valid 'Artist - Album' lines. Please retake the image.",
           );
@@ -105,7 +110,7 @@ export function Processing() {
         <button
           onClick={() => {
             setCapturedImage(null);
-            navigate("/scan");
+            navigate("/scan", { replace: true });
           }}
           className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl transition-colors"
         >
