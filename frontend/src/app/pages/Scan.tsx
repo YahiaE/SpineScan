@@ -1,10 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { X, Check, CameraOff } from "lucide-react";
+import { X, Check, CameraOff, Zap, ZapOff } from "lucide-react";
 import { useAppContext } from "../store";
 import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
+
+type TorchCapableTrack = MediaStreamTrack & {
+  applyConstraints?: (constraints: MediaTrackConstraints) => Promise<void>;
+};
+
+function supportsTorch(track: TorchCapableTrack | undefined): boolean {
+  const capabilities = track?.getCapabilities?.() as
+    | { torch?: boolean }
+    | undefined;
+  return Boolean(capabilities?.torch);
+}
 
 export function Scan() {
   const navigate = useNavigate();
@@ -19,8 +30,21 @@ export function Scan() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchEnabled, setTorchEnabled] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const syncTorchAvailability = (stream: MediaStream | null) => {
+    const track = stream?.getVideoTracks?.()[0] as
+      | TorchCapableTrack
+      | undefined;
+    const torchAvailable = supportsTorch(track);
+    setTorchSupported(torchAvailable);
+    if (!torchAvailable) {
+      setTorchEnabled(false);
+    }
+  };
 
   const startCamera = async () => {
     setCameraError(null);
@@ -36,6 +60,7 @@ export function Scan() {
         audio: false,
       });
       streamRef.current = stream;
+      syncTorchAvailability(stream);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play().catch(() => undefined);
@@ -48,12 +73,39 @@ export function Scan() {
   const stopCamera = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    setTorchSupported(false);
+    setTorchEnabled(false);
   };
 
   useEffect(() => {
     startCamera();
     return stopCamera;
   }, []);
+
+  const handleTorchToggle = async () => {
+    const track = streamRef.current?.getVideoTracks?.()[0] as
+      | TorchCapableTrack
+      | undefined;
+
+    if (!track?.applyConstraints || !supportsTorch(track)) {
+      setTorchSupported(false);
+      setTorchEnabled(false);
+      return;
+    }
+
+    const nextTorchState = !torchEnabled;
+
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: nextTorchState } as MediaTrackConstraintSet],
+      });
+      setTorchEnabled(nextTorchState);
+      setCaptureError(null);
+    } catch {
+      setCaptureError("Flash is not available on this camera.");
+      setTorchEnabled(false);
+    }
+  };
 
   const handleCapture = () => {
     const video = videoRef.current;
@@ -186,6 +238,26 @@ export function Scan() {
             className="absolute inset-0 w-full h-full object-cover"
           />
           <canvas ref={canvasRef} className="hidden" />
+
+          {torchSupported && (
+            <button
+              onClick={handleTorchToggle}
+              className="absolute top-4 right-4 z-10 flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75"
+              type="button"
+            >
+              {torchEnabled ? (
+                <>
+                  <ZapOff className="h-4 w-4" />
+                  <span>Flash Off</span>
+                </>
+              ) : (
+                <>
+                  <Zap className="h-4 w-4" />
+                  <span>Flash On</span>
+                </>
+              )}
+            </button>
+          )}
 
           {/* Viewfinder brackets */}
           <div className="absolute inset-8 border-2 border-emerald-500/50 rounded-lg pointer-events-none">
