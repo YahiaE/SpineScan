@@ -17,11 +17,15 @@ export function Scan() {
   const [preview, setPreview] = useState<string | null>(null);
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [captureError, setCaptureError] = useState<string | null>(null);
+  const [cameraReady, setCameraReady] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const startCamera = async () => {
     setCameraError(null);
+    setCaptureError(null);
+    setCameraReady(false);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -34,6 +38,7 @@ export function Scan() {
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => undefined);
       }
     } catch {
       setCameraError("Camera access denied or unavailable.");
@@ -55,17 +60,45 @@ export function Scan() {
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    setCaptureError(null);
+
+    const width = video.videoWidth || video.clientWidth;
+    const height = video.videoHeight || video.clientHeight;
+
+    if (!width || !height) {
+      setCaptureError(
+        "Camera is still initializing. Please wait a moment and try again.",
+      );
+      return;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
     canvas.getContext("2d")!.drawImage(video, 0, 0);
 
     canvas.toBlob(
       (blob) => {
-        if (!blob) return;
-        const url = URL.createObjectURL(blob);
-        stopCamera();
-        setPreview(url);
-        setPreviewBlob(blob);
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          stopCamera();
+          setPreview(url);
+          setPreviewBlob(blob);
+          return;
+        }
+
+        // Safari can occasionally return null from toBlob; fallback to dataURL conversion.
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        fetch(dataUrl)
+          .then((res) => res.blob())
+          .then((fallbackBlob) => {
+            const url = URL.createObjectURL(fallbackBlob);
+            stopCamera();
+            setPreview(url);
+            setPreviewBlob(fallbackBlob);
+          })
+          .catch(() => {
+            setCaptureError("Could not capture photo. Please retake.");
+          });
       },
       "image/jpeg",
       0.92,
@@ -78,6 +111,7 @@ export function Scan() {
       setPreview(null);
       setPreviewBlob(null);
     }
+    setCaptureError(null);
     setUploadError(null);
     startCamera();
   };
@@ -99,6 +133,11 @@ export function Scan() {
 
       if (!res.ok) {
         const payload = await res.json().catch(() => null);
+        if (res.status === 401) {
+          throw new Error(
+            "Session expired. Please reconnect your Discogs account.",
+          );
+        }
         throw new Error(payload?.error ?? "Upload failed");
       }
 
@@ -137,6 +176,8 @@ export function Scan() {
             autoPlay
             playsInline
             muted
+            onLoadedMetadata={() => setCameraReady(true)}
+            onCanPlay={() => setCameraReady(true)}
             className="absolute inset-0 w-full h-full object-cover"
           />
           <canvas ref={canvasRef} className="hidden" />
@@ -157,10 +198,17 @@ export function Scan() {
 
           <button
             onClick={handleCapture}
+            disabled={!cameraReady}
             className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center p-1 bg-transparent z-10 active:scale-95 transition-transform"
           >
             <div className="w-full h-full bg-white rounded-full" />
           </button>
+
+          {(captureError || uploadError) && (
+            <p className="text-red-400 text-sm text-center mt-4 z-10 bg-black/60 px-4 py-2 rounded-lg">
+              {captureError ?? uploadError}
+            </p>
+          )}
         </div>
       ) : (
         <div className="flex-1 relative flex flex-col bg-neutral-950">
