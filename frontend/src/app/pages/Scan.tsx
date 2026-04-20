@@ -168,12 +168,12 @@ export function Scan() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-black relative">
+    <div className="flex flex-col h-full min-h-0 bg-black relative overflow-hidden">
       {!preview ? (
         <div
-          className="flex-1 relative flex flex-col items-center justify-end overflow-hidden"
+          className="flex-1 min-h-0 relative flex flex-col items-center justify-end overflow-hidden"
           style={{
-            paddingBottom: "calc(3rem + env(safe-area-inset-bottom, 0px))",
+            paddingBottom: "calc(1.25rem + env(safe-area-inset-bottom, 0px))",
           }}
         >
           <video
@@ -195,8 +195,8 @@ export function Scan() {
             <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-emerald-400 -m-[2px] rounded-br-lg" />
           </div>
 
-          <div className="text-center z-10 mb-8 bg-black/60 px-6 py-2 rounded-full backdrop-blur-sm">
-            <p className="text-white text-sm font-medium">
+          <div className="text-center z-10 mb-4 bg-black/60 px-4 py-2 rounded-full backdrop-blur-sm max-w-[85%]">
+            <p className="text-white text-xs sm:text-sm font-medium leading-tight">
               Line up your CD spines and take a photo.
             </p>
           </div>
@@ -204,20 +204,24 @@ export function Scan() {
           <button
             onClick={handleCapture}
             disabled={!cameraReady}
-            className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center p-1 bg-transparent z-10 active:scale-95 transition-transform"
+            className="rounded-full border-4 border-white flex items-center justify-center p-1 bg-transparent z-10 active:scale-95 transition-transform disabled:opacity-60"
+            style={{
+              width: "clamp(4rem, 18vw, 5rem)",
+              height: "clamp(4rem, 18vw, 5rem)",
+            }}
           >
             <div className="w-full h-full bg-white rounded-full" />
           </button>
 
           {(captureError || uploadError) && (
-            <p className="text-red-400 text-sm text-center mt-4 z-10 bg-black/60 px-4 py-2 rounded-lg">
+            <p className="text-red-400 text-xs sm:text-sm text-center mt-3 z-10 bg-black/60 px-3 py-2 rounded-lg max-w-[88%] leading-snug">
               {captureError ?? uploadError}
             </p>
           )}
         </div>
       ) : (
-        <div className="flex-1 relative flex flex-col bg-neutral-950">
-          <div className="flex-1 m-4 border border-neutral-700 rounded-xl overflow-hidden">
+        <div className="flex-1 min-h-0 relative flex flex-col bg-neutral-950 overflow-hidden">
+          <div className="flex-1 min-h-0 m-3 border border-neutral-700 rounded-xl overflow-hidden">
             <img
               src={preview}
               alt="Captured photo"
@@ -226,28 +230,32 @@ export function Scan() {
           </div>
 
           <div
-            className="px-6 pt-6 flex gap-4 bg-neutral-950 border-t border-neutral-900"
+            className="shrink-0 px-3 pt-3 grid grid-cols-2 gap-3 bg-neutral-950 border-t border-neutral-900"
             style={{
-              paddingBottom: "calc(1.5rem + env(safe-area-inset-bottom, 0px))",
+              paddingBottom:
+                "calc(0.875rem + env(safe-area-inset-bottom, 0px))",
             }}
           >
             <button
               onClick={handleRetake}
-              className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white py-4 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors"
+              className="min-w-0 bg-neutral-800 hover:bg-neutral-700 text-white py-3 rounded-xl font-medium text-sm sm:text-base flex items-center justify-center gap-2 transition-colors"
             >
-              <X className="w-5 h-5" /> Retake
+              <X className="w-4 h-4 shrink-0" />
+              <span className="truncate">Retake</span>
             </button>
             <button
               onClick={handleUsePhoto}
               disabled={uploading}
-              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-4 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+              className="min-w-0 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-medium text-sm sm:text-base flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
             >
-              <Check className="w-5 h-5" />
-              {uploading ? "Uploading..." : "Use Photo"}
+              <Check className="w-4 h-4 shrink-0" />
+              <span className="truncate">
+                {uploading ? "Uploading..." : "Use Photo"}
+              </span>
             </button>
           </div>
           {uploadError && (
-            <p className="text-red-400 text-sm text-center pb-2">
+            <p className="text-red-400 text-xs sm:text-sm text-center px-3 pb-2 leading-snug shrink-0">
               {uploadError}
             </p>
           )}
