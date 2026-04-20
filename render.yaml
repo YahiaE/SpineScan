@@ -8,7 +8,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.10
       - key: DISCOGS_SYNC_LOOKUP_ENABLED
-        value: "false"
+        value: "true"
       - key: DISCOGS_LOOKUP_MAX_QUEUE_DEPTH
         value: "50"
       - key: DISCOGS_LOOKUP_MAX_STARTED_JOBS
