@@ -11,6 +11,7 @@ from config import (
     IMPORT_REQUESTS_PER_WINDOW,
     VALIDATE_MAX_ENTRIES,
     VALIDATE_REQUESTS_PER_WINDOW,
+    VALIDATE_SYNC_BUDGET,
 )
 from extensions import redis_conn
 from services.discogs_service import (
@@ -139,6 +140,8 @@ def validate_entries():
         return jsonify({"error": "User not authenticated"}), 401
 
     validations = []
+    sync_budget = max(0, int(VALIDATE_SYNC_BUDGET))
+    sync_budget_used = 0
 
     for entry in entries:
         entry_id = entry.get("id")
@@ -155,7 +158,15 @@ def validate_entries():
             )
             continue
 
-        match = resolve_release_match(artist, title, enqueue_if_missing=True)
+        use_sync_path = sync_budget_used < sync_budget
+        match = resolve_release_match(
+            artist,
+            title,
+            enqueue_if_missing=not use_sync_path,
+        )
+        if use_sync_path:
+            sync_budget_used += 1
+
         validations.append({"id": entry_id, **match})
 
     return jsonify({"validations": validations})

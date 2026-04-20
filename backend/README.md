@@ -185,6 +185,7 @@ DISCOGS_SYNC_LOOKUP_ENABLED=false
 DISCOGS_LOOKUP_MAX_QUEUE_DEPTH=50
 DISCOGS_LOOKUP_MAX_STARTED_JOBS=10
 VALIDATE_MAX_ENTRIES=20
+VALIDATE_SYNC_BUDGET=3
 IMPORT_MAX_ENTRIES=20
 VALIDATE_REQUESTS_PER_WINDOW=12
 IMPORT_REQUESTS_PER_WINDOW=6
@@ -198,6 +199,7 @@ Notes:
 - Keep `SESSION_COOKIE_SECURE=true` in production.
 - Use `SESSION_COOKIE_SAMESITE=None` when frontend/backend are on different domains (for example Vercel + Render).
 - `DISCOGS_SYNC_LOOKUP_ENABLED=false` keeps expensive lookups off the web request path.
+- `VALIDATE_SYNC_BUDGET` runs only the first N entries in-request, then overflows remaining entries to the worker queue.
 - Lower queue/start limits are intentional for one Fly worker and one Render web service.
 - `VALIDATE_MAX_ENTRIES` and `IMPORT_MAX_ENTRIES` cap per-request batch size.
 - `VALIDATE_REQUESTS_PER_WINDOW` and `IMPORT_REQUESTS_PER_WINDOW` cap per-user request volume inside a 60-second window.
