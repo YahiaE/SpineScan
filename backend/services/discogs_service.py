@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from collections import deque
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 
 import discogs_client
 from discogs_client.exceptions import HTTPError
@@ -43,13 +43,17 @@ from config import (
     DISCOGS_MAX_RETRIES,
     DISCOGS_RATE_WINDOW_SECONDS,
     DISCOGS_SYNC_LOOKUP_ENABLED,
+    DISCOGS_SYNC_LOOKUP_MAX_IN_FLIGHT,
     DISCOGS_SYNC_LOOKUP_TIMEOUT_SECONDS,
     DISCOGS_UNAUTH_REQUEST_LIMIT,
 )
 from extensions import lookup_queue, redis_conn, supabase
 
 
-_sync_lookup_executor = ThreadPoolExecutor(max_workers=2)
+_sync_lookup_executor = ThreadPoolExecutor(
+    max_workers=max(1, DISCOGS_SYNC_LOOKUP_MAX_IN_FLIGHT)
+)
+_sync_lookup_slots = BoundedSemaphore(max(1, DISCOGS_SYNC_LOOKUP_MAX_IN_FLIGHT))
 _discogs_metrics_lock = Lock()
 _discogs_latencies = deque(maxlen=5000)
 _discogs_calls_total = 0
@@ -1347,9 +1351,28 @@ def is_lookup_queue_saturated():
 
 def run_sync_lookup_with_timeout(artist, title, normalized_key):
     """Execute sync fallback in a worker thread so request path has a hard timeout."""
-    future = _sync_lookup_executor.submit(
-        run_album_lookup_job, artist, title, normalized_key
-    )
+    access_token = None
+    access_token_secret = None
+    try:
+        access_token = session.get("access_token")
+        access_token_secret = session.get("access_token_secret")
+    except RuntimeError:
+        # No request context (for example tests/background calls), so fallback to public lookup.
+        pass
+
+    if access_token and access_token_secret:
+        future = _sync_lookup_executor.submit(
+            run_album_lookup_job_authenticated,
+            artist,
+            title,
+            normalized_key,
+            access_token,
+            access_token_secret,
+        )
+    else:
+        future = _sync_lookup_executor.submit(
+            run_album_lookup_job, artist, title, normalized_key
+        )
 
     try:
         timeout_seconds = max(0.5, float(DISCOGS_SYNC_LOOKUP_TIMEOUT_SECONDS))
@@ -1359,6 +1382,18 @@ def run_sync_lookup_with_timeout(artist, title, normalized_key):
         raise TimeoutError(
             f"Synchronous lookup timed out after {timeout_seconds:.1f}s"
         ) from error
+
+
+def try_run_sync_lookup_with_capacity(artist, title, normalized_key):
+    """Run sync lookup only when an in-flight slot is available."""
+    acquired = _sync_lookup_slots.acquire(blocking=False)
+    if not acquired:
+        raise RuntimeError("sync_lookup_capacity_reached")
+
+    try:
+        return run_sync_lookup_with_timeout(artist, title, normalized_key)
+    finally:
+        _sync_lookup_slots.release()
 
 
 def resolve_release_match(artist, title, enqueue_if_missing=True):
@@ -1391,6 +1426,17 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
     worker_available = has_lookup_worker_available()
     queue_saturated = is_lookup_queue_saturated()
 
+    # Hybrid strategy: serve lookups synchronously while capacity is available,
+    # then overflow additional lookups to the worker queue.
+    if DISCOGS_SYNC_LOOKUP_ENABLED:
+        try:
+            return try_run_sync_lookup_with_capacity(artist, title, normalized_key)
+        except RuntimeError as error:
+            if str(error) != "sync_lookup_capacity_reached":
+                record_sync_lookup_failure()
+        except Exception:
+            record_sync_lookup_failure()
+
     if worker_available and not queue_saturated:
         try:
             enqueue_album_lookup_job(artist, title, normalized_key)
@@ -1408,12 +1454,7 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
         open_lookup_breaker("sync_lookup_disabled")
         return build_degraded_lookup_result()
 
-    try:
-        return run_sync_lookup_with_timeout(artist, title, normalized_key)
-    except Exception:
-        record_sync_lookup_failure()
-        open_lookup_breaker("sync_lookup_failed")
-        return build_degraded_lookup_result()
+    return build_degraded_lookup_result()
 
 
 def run_album_lookup_job(artist, title, normalized_key=None):
@@ -1427,4 +1468,25 @@ def run_album_lookup_job(artist, title, normalized_key=None):
     except Exception as error:
         redis_conn.delete(album_lookup_pending_key(lookup_key))
         print(f"Discogs lookup job failed for {artist} - {title}: {error}")
+        raise
+
+
+def run_album_lookup_job_authenticated(
+    artist,
+    title,
+    normalized_key,
+    access_token,
+    access_token_secret,
+):
+    """Sync lookup path that uses user's Discogs OAuth token (auth RPM bucket)."""
+    lookup_key = normalized_key or album_lookup_normalized_key(artist, title)
+
+    try:
+        client = create_discogs_oauth_client()
+        client.set_token(access_token, access_token_secret)
+        match = find_best_release_match(client, artist, title, authenticated=True)
+        return persist_lookup_result(lookup_key, artist, title, match)
+    except Exception as error:
+        redis_conn.delete(album_lookup_pending_key(lookup_key))
+        print(f"Authenticated sync lookup failed for {artist} - {title}: {error}")
         raise
