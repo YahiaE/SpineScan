@@ -170,7 +170,12 @@ export function Scan() {
   return (
     <div className="flex flex-col h-full bg-black relative">
       {!preview ? (
-        <div className="flex-1 relative flex flex-col items-center justify-end pb-12 overflow-hidden">
+        <div
+          className="flex-1 relative flex flex-col items-center justify-end overflow-hidden"
+          style={{
+            paddingBottom: "calc(3rem + env(safe-area-inset-bottom, 0px))",
+          }}
+        >
           <video
             ref={videoRef}
             autoPlay
@@ -220,7 +225,12 @@ export function Scan() {
             />
           </div>
 
-          <div className="p-6 flex gap-4 bg-neutral-950 border-t border-neutral-900">
+          <div
+            className="px-6 pt-6 flex gap-4 bg-neutral-950 border-t border-neutral-900"
+            style={{
+              paddingBottom: "calc(1.5rem + env(safe-area-inset-bottom, 0px))",
+            }}
+          >
             <button
               onClick={handleRetake}
               className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white py-4 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors"

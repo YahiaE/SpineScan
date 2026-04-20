@@ -53,7 +53,7 @@ export function Layout() {
 
   return (
     <div className="min-h-screen bg-neutral-900 flex justify-center sm:py-8 sm:px-4 text-white">
-      <div className="w-full max-w-md bg-neutral-950 sm:rounded-3xl sm:border sm:border-neutral-800 overflow-hidden relative shadow-2xl flex flex-col h-screen sm:h-[850px]">
+      <div className="w-full max-w-md bg-neutral-950 sm:rounded-3xl sm:border sm:border-neutral-800 overflow-hidden relative shadow-2xl flex flex-col h-[100dvh] sm:h-[850px]">
         {/* Header */}
         <header className="h-14 flex items-center justify-between px-4 border-b border-neutral-800 shrink-0 z-10 bg-neutral-950/80 backdrop-blur-md">
           <div className="flex items-center gap-3">
