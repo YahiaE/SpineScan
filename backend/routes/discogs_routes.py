@@ -4,7 +4,14 @@ import time
 from discogs_client.exceptions import HTTPError
 from flask import Blueprint, jsonify, request, session
 
-from config import IMPORT_IDEMPOTENCY_TTL_SECONDS
+from config import (
+    DISCOGS_RATE_WINDOW_SECONDS,
+    IMPORT_IDEMPOTENCY_TTL_SECONDS,
+    IMPORT_MAX_ENTRIES,
+    IMPORT_REQUESTS_PER_WINDOW,
+    VALIDATE_MAX_ENTRIES,
+    VALIDATE_REQUESTS_PER_WINDOW,
+)
 from extensions import redis_conn
 from services.discogs_service import (
     add_release_to_folder,
@@ -29,6 +36,25 @@ from services.import_history_service import (
 )
 
 discogs_bp = Blueprint("discogs", __name__, url_prefix="/discogs")
+
+
+def _user_rate_limit_key(action):
+    user_scope = session.get("access_token", "anonymous")
+    bucket_start = int(time.time() // DISCOGS_RATE_WINDOW_SECONDS)
+    return f"discogs:user-rate:{action}:{user_scope}:{bucket_start}"
+
+
+def _consume_user_rate_slot(action, max_requests_per_window):
+    """Return True when the user can proceed inside the current rate window."""
+    if max_requests_per_window <= 0:
+        return True
+
+    key = _user_rate_limit_key(action)
+    current_count = redis_conn.incr(key)
+    if current_count == 1:
+        redis_conn.expire(key, DISCOGS_RATE_WINDOW_SECONDS * 2)
+
+    return current_count <= max_requests_per_window
 
 
 @discogs_bp.route("/import-history", methods=["GET"])
@@ -91,6 +117,22 @@ def validate_entries():
     if not isinstance(entries, list) or not entries:
         return jsonify({"error": "Missing 'entries' in request body"}), 400
 
+    if len(entries) > VALIDATE_MAX_ENTRIES:
+        return (
+            jsonify(
+                {
+                    "error": f"Too many entries. Maximum allowed is {VALIDATE_MAX_ENTRIES}",
+                }
+            ),
+            413,
+        )
+
+    if not _consume_user_rate_slot("validate", VALIDATE_REQUESTS_PER_WINDOW):
+        return (
+            jsonify({"error": "Validation rate limit exceeded. Please retry shortly."}),
+            429,
+        )
+
     try:
         get_discogs_client()
     except ValueError:
@@ -130,6 +172,22 @@ def import_entries():
 
     if not isinstance(entries, list) or not entries:
         return jsonify({"error": "Missing 'entries' in request body"}), 400
+
+    if len(entries) > IMPORT_MAX_ENTRIES:
+        return (
+            jsonify(
+                {
+                    "error": f"Too many entries. Maximum allowed is {IMPORT_MAX_ENTRIES}",
+                }
+            ),
+            413,
+        )
+
+    if not _consume_user_rate_slot("import", IMPORT_REQUESTS_PER_WINDOW):
+        return (
+            jsonify({"error": "Import rate limit exceeded. Please retry shortly."}),
+            429,
+        )
 
     try:
         folder_id = int(folder_id)
