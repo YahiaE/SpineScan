@@ -52,10 +52,13 @@ export function Layout() {
     location.pathname === "/" || location.pathname === "/home";
 
   return (
-    <div className="min-h-screen bg-neutral-900 flex justify-center sm:py-8 sm:px-4 text-white">
+    <div className="min-h-[100svh] bg-neutral-900 flex justify-center sm:py-8 sm:px-4 text-white">
       <div className="w-full max-w-md bg-neutral-950 sm:rounded-3xl sm:border sm:border-neutral-800 overflow-hidden relative shadow-2xl flex flex-col h-[100dvh] sm:h-[850px]">
         {/* Header */}
-        <header className="h-14 flex items-center justify-between px-4 border-b border-neutral-800 shrink-0 z-10 bg-neutral-950/80 backdrop-blur-md">
+        <header
+          className="h-14 flex items-center justify-between px-4 border-b border-neutral-800 shrink-0 z-10 bg-neutral-950/80 backdrop-blur-md"
+          style={{ paddingTop: "env(safe-area-inset-top, 0px)" }}
+        >
           <div className="flex items-center gap-3">
             {!isHomeOrWelcome && (
               <button
@@ -75,7 +78,7 @@ export function Layout() {
         </header>
 
         {/* Content Area with Animation */}
-        <main className="flex-1 overflow-hidden relative bg-neutral-950">
+        <main className="flex-1 min-h-0 overflow-hidden relative bg-neutral-950">
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
@@ -83,7 +86,8 @@ export function Layout() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
-              className="absolute inset-0 flex flex-col"
+              className="absolute inset-0 flex flex-col overflow-y-auto"
+              style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
             >
               <Outlet />
             </motion.div>
