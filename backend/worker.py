@@ -13,12 +13,12 @@ if BACKEND_DIR not in sys.path:
 def build_redis_connection():
     redis_url = os.getenv("REDIS_URL")
     if redis_url:
-        return redis.from_url(redis_url, decode_responses=True)
+        return redis.from_url(redis_url, decode_responses=False)
 
     return redis.Redis(
         host=os.getenv("REDIS_HOST", "localhost"),
         port=int(os.getenv("REDIS_PORT", "6379")),
-        decode_responses=True,
+        decode_responses=False,
     )
 
 

@@ -15,7 +15,13 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 if REDIS_URL:
     redis_conn = redis.from_url(REDIS_URL, decode_responses=True)
+    rq_redis_conn = redis.from_url(REDIS_URL, decode_responses=False)
 else:
     redis_conn = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    rq_redis_conn = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=False,
+    )
 
-lookup_queue = Queue(DISCOGS_LOOKUP_QUEUE, connection=redis_conn)
+lookup_queue = Queue(DISCOGS_LOOKUP_QUEUE, connection=rq_redis_conn)

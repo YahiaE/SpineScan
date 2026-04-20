@@ -1288,7 +1288,7 @@ def enqueue_album_lookup_job(artist, title, normalized_key):
 def has_lookup_worker_available():
     """Return True when at least one worker is listening to the lookup queue."""
     try:
-        workers = Worker.all(connection=redis_conn, queue=lookup_queue)
+        workers = Worker.all(connection=lookup_queue.connection, queue=lookup_queue)
         return len(workers) > 0
     except Exception:
         return False
@@ -1306,7 +1306,7 @@ def count_lookup_pending_markers():
 
 def get_lookup_queue_stats():
     """Collect queue and worker telemetry for the validation pipeline."""
-    workers = Worker.all(connection=redis_conn, queue=lookup_queue)
+    workers = Worker.all(connection=lookup_queue.connection, queue=lookup_queue)
     started_registry = StartedJobRegistry(queue=lookup_queue)
     failed_registry = FailedJobRegistry(queue=lookup_queue)
     finished_registry = FinishedJobRegistry(queue=lookup_queue)
