@@ -3,6 +3,7 @@ import time
 from discogs_client.exceptions import HTTPError
 from flask import Blueprint, jsonify, request, session
 
+from config import BASE_URL
 from extensions import redis_conn
 from services.discogs_service import call_discogs, create_discogs_oauth_client
 
@@ -15,7 +16,7 @@ def get_request_token():
     try:
         d = create_discogs_oauth_client()
         request_token, request_token_secret, url = call_discogs(
-            lambda: d.get_authorize_url("http://192.168.1.146:5000/auth/callback"),
+            lambda: d.get_authorize_url(f"{BASE_URL}/auth/callback"),
             authenticated=False,
         )
 

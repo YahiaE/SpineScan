@@ -5,6 +5,8 @@ load_dotenv()
 
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY")
 
+BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
+
 
 def _parse_csv_env(name, default=""):
     raw_value = os.getenv(name, default)
