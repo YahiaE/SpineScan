@@ -1,0 +1,8 @@
+app = "ye-spinescan-worker"
+primary_region = "iad"
+
+[build]
+dockerfile = "Dockerfile.worker"
+
+[processes]
+worker = "python backend/worker.py"
