@@ -239,13 +239,19 @@ export function Scan() {
           />
           <canvas ref={canvasRef} className="hidden" />
 
-          {torchSupported && (
-            <button
-              onClick={handleTorchToggle}
-              className="absolute top-4 right-4 z-10 flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75"
-              type="button"
-            >
-              {torchEnabled ? (
+          <button
+            onClick={handleTorchToggle}
+            disabled={!torchSupported}
+            className="absolute top-4 right-4 z-10 flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75 disabled:opacity-60 disabled:hover:bg-black/60"
+            type="button"
+            title={
+              torchSupported
+                ? "Toggle camera flash"
+                : "Flash is not supported in this browser"
+            }
+          >
+            {torchSupported ? (
+              torchEnabled ? (
                 <>
                   <ZapOff className="h-4 w-4" />
                   <span>Flash Off</span>
@@ -255,12 +261,25 @@ export function Scan() {
                   <Zap className="h-4 w-4" />
                   <span>Flash On</span>
                 </>
-              )}
-            </button>
-          )}
+              )
+            ) : (
+              <>
+                <ZapOff className="h-4 w-4" />
+                <span>Flash Unavailable</span>
+              </>
+            )}
+          </button>
 
           {/* Viewfinder brackets */}
-          <div className="absolute inset-8 border-2 border-emerald-500/50 rounded-lg pointer-events-none">
+          <div
+            className="absolute border-2 border-emerald-500/50 rounded-lg pointer-events-none"
+            style={{
+              top: "1.5rem",
+              left: "1.5rem",
+              right: "1.5rem",
+              bottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))",
+            }}
+          >
             <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-emerald-400 -m-[2px] rounded-tl-lg" />
             <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-emerald-400 -m-[2px] rounded-tr-lg" />
             <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-emerald-400 -m-[2px] rounded-bl-lg" />
@@ -280,6 +299,7 @@ export function Scan() {
             style={{
               width: "clamp(4rem, 18vw, 5rem)",
               height: "clamp(4rem, 18vw, 5rem)",
+              marginBottom: "0.25rem",
             }}
           >
             <div className="w-full h-full bg-white rounded-full" />
