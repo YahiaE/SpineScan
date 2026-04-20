@@ -16,6 +16,13 @@ def _parse_csv_env(name, default=""):
 SESSION_COOKIE_SECURE = (
     os.getenv("SESSION_COOKIE_SECURE", "false").strip().lower() == "true"
 )
+
+_SESSION_COOKIE_SAMESITE_RAW = os.getenv("SESSION_COOKIE_SAMESITE", "Lax").strip()
+if _SESSION_COOKIE_SAMESITE_RAW.lower() in {"lax", "strict", "none"}:
+    SESSION_COOKIE_SAMESITE = _SESSION_COOKIE_SAMESITE_RAW.capitalize()
+else:
+    SESSION_COOKIE_SAMESITE = "Lax"
+
 CSRF_ORIGIN_ENFORCEMENT = (
     os.getenv("CSRF_ORIGIN_ENFORCEMENT", "false").strip().lower() == "true"
 )

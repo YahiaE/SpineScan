@@ -179,6 +179,8 @@ CSRF_TRUSTED_ORIGINS=https://your-frontend-origin.example
 REDIS_URL=redis://<your-redis-host>:6379
 OPS_API_KEY=replace-with-strong-random-secret
 CAPTURE_SIGNATURE_SECRET=replace-with-different-strong-random-secret
+SESSION_COOKIE_SECURE=true
+SESSION_COOKIE_SAMESITE=None
 DISCOGS_SYNC_LOOKUP_ENABLED=false
 DISCOGS_LOOKUP_MAX_QUEUE_DEPTH=50
 DISCOGS_LOOKUP_MAX_STARTED_JOBS=10
@@ -194,6 +196,7 @@ Notes:
 - `CSRF_TRUSTED_ORIGINS` is also comma-separated and should usually match your frontend origin list.
 - `REDIS_URL` takes precedence over `REDIS_HOST` and `REDIS_PORT`.
 - Keep `SESSION_COOKIE_SECURE=true` in production.
+- Use `SESSION_COOKIE_SAMESITE=None` when frontend/backend are on different domains (for example Vercel + Render).
 - `DISCOGS_SYNC_LOOKUP_ENABLED=false` keeps expensive lookups off the web request path.
 - Lower queue/start limits are intentional for one Fly worker and one Render web service.
 - `VALIDATE_MAX_ENTRIES` and `IMPORT_MAX_ENTRIES` cap per-request batch size.
