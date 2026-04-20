@@ -8,15 +8,16 @@ const SUPABASE_ACCESS_TOKEN_KEYS = [
   "sb:access_token",
 ];
 
-const PROD_FALLBACK_API_BASE_URL = "https://spinescan-1.onrender.com";
+const IS_VERCEL_HOST =
+  typeof window !== "undefined" && window.location.hostname.endsWith(".vercel.app");
 
 const API_BASE_URL = import.meta.env.DEV
   ? undefined
-  : (
-      (import.meta.env.VITE_API_BASE_URL as string | undefined)
+  : IS_VERCEL_HOST
+    ? undefined
+    : (import.meta.env.VITE_API_BASE_URL as string | undefined)
         ?.trim()
-        .replace(/\/$/, "") || PROD_FALLBACK_API_BASE_URL
-    );
+        .replace(/\/$/, "");
 
 function resolveApiUrl(url: string): string {
   if (!API_BASE_URL) {
