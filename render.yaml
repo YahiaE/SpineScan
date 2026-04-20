@@ -3,16 +3,21 @@ services:
     name: spinescan-backend
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT wsgi:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --worker-class gthread --workers 2 --threads 4 --timeout 25 --graceful-timeout 20 --keep-alive 5 wsgi:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
-
-  - type: worker
-    name: spinescan-worker
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python backend/worker.py
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.10
+      - key: DISCOGS_SYNC_LOOKUP_ENABLED
+        value: "false"
+      - key: DISCOGS_LOOKUP_MAX_QUEUE_DEPTH
+        value: "50"
+      - key: DISCOGS_LOOKUP_MAX_STARTED_JOBS
+        value: "10"
+      - key: VALIDATE_MAX_ENTRIES
+        value: "20"
+      - key: IMPORT_MAX_ENTRIES
+        value: "20"
+      - key: VALIDATE_REQUESTS_PER_WINDOW
+        value: "12"
+      - key: IMPORT_REQUESTS_PER_WINDOW
+        value: "6"
