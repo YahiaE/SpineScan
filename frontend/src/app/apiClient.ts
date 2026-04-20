@@ -8,6 +8,30 @@ const SUPABASE_ACCESS_TOKEN_KEYS = [
   "sb:access_token",
 ];
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)
+  ?.trim()
+  .replace(/\/$/, "");
+
+function resolveApiUrl(url: string): string {
+  if (!API_BASE_URL) {
+    return url;
+  }
+
+  if (url === "/api") {
+    return API_BASE_URL;
+  }
+
+  if (url.startsWith("/api/")) {
+    return `${API_BASE_URL}${url.slice(4)}`;
+  }
+
+  if (url.startsWith("/")) {
+    return `${API_BASE_URL}${url}`;
+  }
+
+  return url;
+}
+
 function parseSupabaseSessionPayload(payload: string | null): string | null {
   if (!payload) return null;
 
