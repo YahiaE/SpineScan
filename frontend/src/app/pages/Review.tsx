@@ -276,9 +276,8 @@ export function Review() {
     selectedCollectionId !== null &&
     scannedAlbums.every((album) => album.validation?.status === "valid");
   const totalCount = scannedAlbums.length;
-  const resolvedCount = validCount + invalidCount;
   const progressPercent =
-    totalCount > 0 ? Math.round((resolvedCount / totalCount) * 100) : 0;
+    totalCount > 0 ? Math.round((validCount / totalCount) * 100) : 0;
   const queuedPendingCount = scannedAlbums.filter(
     (album) =>
       album.validation?.status === "pending" &&
@@ -413,7 +412,7 @@ export function Review() {
                   </span>
                 </div>
                 <span>
-                  {resolvedCount}/{totalCount} ({progressPercent}%)
+                  {validCount}/{totalCount} ({progressPercent}%)
                 </span>
               </div>
 
@@ -425,9 +424,11 @@ export function Review() {
               </div>
 
               <p className="text-xs text-neutral-500">
-                {pendingCount === 0
-                  ? "All titles have a final validation result."
-                  : `${pendingCount} title${pendingCount === 1 ? " is" : "s are"} still pending validation.`}
+                {pendingCount > 0
+                  ? `${pendingCount} title${pendingCount === 1 ? " is" : "s are"} still pending validation.`
+                  : invalidCount > 0
+                    ? "Validation finished. Edit or remove invalid titles to continue."
+                    : "All titles are valid and ready to import."}
               </p>
             </div>
           )}
