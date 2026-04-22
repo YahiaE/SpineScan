@@ -59,26 +59,29 @@ python worker.py
 
 ## Collection membership cache flow
 
-Before importing albums, the backend warms a per-user, per-folder membership cache:
+Before importing albums, the backend refreshes the collection cache from Discogs:
 
-1. **Session cache hit**: Redis sets are already populated (same import session).
-   - Just refresh TTL and proceed. Fast path.
+1. **User selects import folder**
+   - Backend calls `refresh_collection_cache_from_discogs()` to fetch latest Discogs state
+   - Releases and album keys are persisted directly to Supabase `discogs_collection_cache` table
+   - Albums are mirrored to `albums` lookup table for fast duplicate detection
 
-2. **Durable cache hit**: Collection cache exists in Supabase.
-   - Load persisted release IDs and album keys from Supabase into Redis.
-   - Mirror to albums lookup table for fast duplicate detection.
-   - Typical case for returning users or repeated imports.
+2. **Import duplicate checks** (via Supabase only, no Redis involved)
+   - `is_release_in_collection_cache()` queries Supabase for release ID membership
+   - `is_album_in_collection_cache()` queries Supabase for album key membership
+   - When duplicate detected, entry is skipped with "already exists" message
 
-3. **Cache miss**: First import or after Supabase cache expiry.
-   - Fetch full collection from Discogs API (paginated, up to 5 pages).
-   - Store release IDs and album keys in Redis (session) and Supabase (persistent).
-   - Mirror to albums lookup table for deduplication.
+3. **After successful add or duplicate detection**
+   - `cache_collection_membership_entry()` updates Supabase immediately
+   - Albums lookup table is also updated for consistency
+   - No Redis caching layer
 
-This split architecture ensures:
-- **Fast warm-up** for repeat users (Supabase → Redis load).
-- **Durable sharing** across sessions (Supabase is persistent).
-- **Efficient deduplication** during imports (Redis sets for membership tests).
-- **Single source of truth**: Supabase, not Redis markers.
+**Benefits of Supabase-only design:**
+- **Accuracy**: Collection state is always current across sessions and instances
+- **Memory efficient**: Redis is freed from collection membership sets
+- **Consistency**: Single source of truth (Supabase), no marker tracking
+- **Scalability**: Can be queried from multiple workers without coordination
+- **Durability**: Collection membership persists indefinitely, not subject to TTL
 
 ## Discogs lookup tuning
 
