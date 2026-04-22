@@ -25,3 +25,11 @@ else:
     )
 
 lookup_queue = Queue(DISCOGS_LOOKUP_QUEUE, connection=rq_redis_conn)
+
+# Safety assertion: rq_redis_conn must never have decode_responses=True or RQ
+# binary pickle payloads will be corrupted at runtime.
+_rq_pool_kwargs = rq_redis_conn.connection_pool.connection_kwargs
+assert not _rq_pool_kwargs.get("decode_responses", False), (
+    "rq_redis_conn must have decode_responses=False for RQ binary job payloads. "
+    "Check REDIS_URL and extension initialisation."
+)

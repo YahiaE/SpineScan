@@ -46,16 +46,22 @@ def _user_rate_limit_key(action):
 
 
 def _consume_user_rate_slot(action, max_requests_per_window):
-    """Return True when the user can proceed inside the current rate window."""
+    """Return True when the user can proceed inside the current rate window.
+
+    Fails open: if Redis is unavailable, the request is allowed through rather
+    than returning a 500.
+    """
     if max_requests_per_window <= 0:
         return True
 
-    key = _user_rate_limit_key(action)
-    current_count = redis_conn.incr(key)
-    if current_count == 1:
-        redis_conn.expire(key, DISCOGS_RATE_WINDOW_SECONDS * 2)
-
-    return current_count <= max_requests_per_window
+    try:
+        key = _user_rate_limit_key(action)
+        current_count = redis_conn.incr(key)
+        if current_count == 1:
+            redis_conn.expire(key, DISCOGS_RATE_WINDOW_SECONDS * 2)
+        return current_count <= max_requests_per_window
+    except Exception:
+        return True
 
 
 @discogs_bp.route("/import-history", methods=["GET"])
@@ -154,6 +160,16 @@ def validate_entries():
                     "id": entry_id,
                     "status": "invalid",
                     "message": "Artist and title are required",
+                }
+            )
+            continue
+
+        if len(artist) > 200 or len(title) > 200:
+            validations.append(
+                {
+                    "id": entry_id,
+                    "status": "invalid",
+                    "message": "Artist and title must be 200 characters or fewer",
                 }
             )
             continue
@@ -275,6 +291,18 @@ def import_entries():
             title = str(entry.get("title", "")).strip()
             release_id = entry.get("release_id")
             entry_album_key = album_identity_key(artist, title)
+
+            if len(artist) > 200 or len(title) > 200:
+                results.append(
+                    {
+                        "id": entry_id,
+                        "status": "rejected",
+                        "artist": artist[:200],
+                        "title": title[:200],
+                        "message": "Artist and title must be 200 characters or fewer",
+                    }
+                )
+                continue
 
             if not release_id:
                 match = resolve_release_match(artist, title, enqueue_if_missing=False)
