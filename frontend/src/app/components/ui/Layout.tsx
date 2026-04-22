@@ -71,7 +71,7 @@ export function Layout() {
             <div className="flex items-center gap-2">
               <Disc className="w-5 h-5 text-emerald-500" />
               <span className="font-semibold text-white tracking-wide">
-                CD Scanner
+                SpineScan
               </span>
             </div>
           </div>
