@@ -10,6 +10,13 @@ from services.discogs_service import call_discogs, create_discogs_oauth_client
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 
 
+def _get_oauth_pending_state():
+    pending = session.get("oauth_pending")
+    if isinstance(pending, dict):
+        return pending
+    return {}
+
+
 @auth_bp.route("/request_token", methods=["GET"])
 def get_request_token():
     """Create an OAuth request token and return Discogs authorize URL."""
@@ -20,14 +27,23 @@ def get_request_token():
             authenticated=False,
         )
 
-        redis_conn.hset(
-            request_token,
-            mapping={
+        try:
+            redis_conn.hset(
+                request_token,
+                mapping={
+                    "request_token_secret": request_token_secret,
+                    "oauth_verifier": "",
+                    "created_at": time.time(),
+                },
+            )
+        except Exception:
+            pending = _get_oauth_pending_state()
+            pending[request_token] = {
                 "request_token_secret": request_token_secret,
                 "oauth_verifier": "",
                 "created_at": time.time(),
-            },
-        )
+            }
+            session["oauth_pending"] = pending
 
         session["request_token"] = request_token
         session["request_token_secret"] = request_token_secret
@@ -48,8 +64,22 @@ def get_request_token():
 def callback():
     oauth_token = request.args.get("oauth_token")
     oauth_verifier = request.args.get("oauth_verifier")
-    if redis_conn.hgetall(oauth_token):
-        redis_conn.hset(oauth_token, "oauth_verifier", oauth_verifier)
+    if oauth_token and oauth_verifier:
+        updated_in_redis = False
+        try:
+            if redis_conn.hgetall(oauth_token):
+                redis_conn.hset(oauth_token, "oauth_verifier", oauth_verifier)
+                updated_in_redis = True
+        except Exception:
+            updated_in_redis = False
+
+        if not updated_in_redis:
+            pending = _get_oauth_pending_state()
+            token_data = pending.get(oauth_token)
+            if token_data:
+                token_data["oauth_verifier"] = oauth_verifier
+                pending[oauth_token] = token_data
+                session["oauth_pending"] = pending
 
     # Do not expose oauth_token in the browser response; the server-side session/Redis state is enough.
     html = """
@@ -80,7 +110,15 @@ def callback():
 @auth_bp.route("/access_token", methods=["GET"])
 def exchange_access_token():
     oauth_token = request.args.get("oauth_token") or session.get("request_token")
-    token_data = redis_conn.hgetall(oauth_token) if oauth_token else {}
+    token_data = {}
+    if oauth_token:
+        try:
+            token_data = redis_conn.hgetall(oauth_token) or {}
+        except Exception:
+            token_data = {}
+
+        if not token_data:
+            token_data = _get_oauth_pending_state().get(oauth_token, {})
 
     if not token_data:
         return {"error": "Missing or invalid oauth_token"}, 400
@@ -106,7 +144,15 @@ def exchange_access_token():
         session["access_token_secret"] = access_token_secret
         session["discogs_username"] = getattr(identity, "username", None)
 
-        redis_conn.delete(oauth_token)
+        try:
+            redis_conn.delete(oauth_token)
+        except Exception:
+            pass
+
+        pending = _get_oauth_pending_state()
+        if oauth_token in pending:
+            pending.pop(oauth_token, None)
+            session["oauth_pending"] = pending
 
         return jsonify(
             {
