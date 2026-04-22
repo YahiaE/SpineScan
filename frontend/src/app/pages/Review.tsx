@@ -433,11 +433,11 @@ export function Review() {
             </div>
           )}
 
-          <div className="flex gap-3">
+          <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
             <button
               onClick={validateAlbums}
               disabled={validating || scannedAlbums.length === 0}
-              className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white py-3 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+              className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white py-2.5 sm:py-3 px-3 rounded-xl text-sm sm:text-base font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
             >
               <ShieldCheck className="w-4 h-4" />
               {validating ? "Validating..." : "Validate Entries"}
@@ -445,7 +445,7 @@ export function Review() {
             <button
               onClick={removeInvalid}
               disabled={invalidCount === 0}
-              className="flex-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 py-3 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+              className="flex-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 py-2.5 sm:py-3 px-3 rounded-xl text-sm sm:text-base font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
             >
               <ShieldAlert className="w-4 h-4" /> Remove Invalid
             </button>
