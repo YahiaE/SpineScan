@@ -7,11 +7,11 @@ from config import (
     REDIS_HOST,
     REDIS_PORT,
     REDIS_URL,
-    SUPABASE_SERVICE_ROLE_KEY,
+    SUPABASE_SECRET_KEY,
     SUPABASE_URL,
 )
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 if REDIS_URL:
     redis_conn = redis.from_url(REDIS_URL, decode_responses=True)
