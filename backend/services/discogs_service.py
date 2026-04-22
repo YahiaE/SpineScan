@@ -163,10 +163,35 @@ def create_discogs_oauth_client():
     )
 
 
-def get_discogs_rate_bucket_key(authenticated):
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def get_discogs_rate_bucket_scope(authenticated, access_token=None):
+    if authenticated and access_token:
+        token_hash = hashlib.sha256(str(access_token).encode("utf-8")).hexdigest()[:12]
+        return f"user:{token_hash}"
+
+    return "global"
+
+
+def get_discogs_rate_bucket_key(authenticated, scope="global"):
     bucket_start = int(time.time() // DISCOGS_RATE_WINDOW_SECONDS)
     bucket_name = "auth" if authenticated else "unauth"
-    return f"discogs:rate:{bucket_name}:{bucket_start}"
+    return f"discogs:rate:{bucket_name}:{scope}:{bucket_start}"
+
+
+def discogs_rate_limit_total_key(authenticated, scope="global"):
+    bucket_name = "auth" if authenticated else "unauth"
+    return f"discogs:rate:{bucket_name}:{scope}:total"
+
+
+def discogs_rate_limit_block_key(authenticated, scope="global"):
+    bucket_name = "auth" if authenticated else "unauth"
+    return f"discogs:rate:{bucket_name}:{scope}:blocked"
 
 
 def lookup_breaker_key():
@@ -232,14 +257,110 @@ def record_sync_lookup_failure():
         pass
 
 
-def acquire_discogs_rate_limit_slot(authenticated=True):
-    """Block until a shared Discogs rate-limit slot is available."""
-    limit = (
+def _read_discogs_dynamic_limit(authenticated, scope="global"):
+    default_limit = (
         DISCOGS_AUTH_REQUEST_LIMIT if authenticated else DISCOGS_UNAUTH_REQUEST_LIMIT
     )
+    try:
+        dynamic_limit = redis_conn.get(
+            discogs_rate_limit_total_key(authenticated, scope)
+        )
+    except Exception:
+        return default_limit
+
+    if dynamic_limit is None:
+        return default_limit
+
+    return max(1, min(default_limit, _safe_int(dynamic_limit, default_limit)))
+
+
+def _should_wait_for_discogs_block(authenticated, scope="global"):
+    try:
+        return bool(redis_conn.get(discogs_rate_limit_block_key(authenticated, scope)))
+    except Exception:
+        return False
+
+
+def _extract_discogs_headers_from_http_error(error):
+    response = getattr(error, "response", None)
+    if response is None:
+        return {}
+
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return {}
+
+    return {
+        "limit": headers.get("X-Discogs-Ratelimit"),
+        "used": headers.get("X-Discogs-Ratelimit-Used"),
+        "remaining": headers.get("X-Discogs-Ratelimit-Remaining"),
+    }
+
+
+def _extract_discogs_headers_from_client(api_call):
+    client = None
+    closure = getattr(api_call, "__closure__", None) or []
+
+    for cell in closure:
+        value = getattr(cell, "cell_contents", None)
+        if isinstance(value, discogs_client.Client):
+            client = value
+            break
+
+    if client is None:
+        return {}
+
+    fetcher = getattr(client, "_fetcher", None)
+    response = getattr(fetcher, "last_response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return {}
+
+    return {
+        "limit": headers.get("X-Discogs-Ratelimit"),
+        "used": headers.get("X-Discogs-Ratelimit-Used"),
+        "remaining": headers.get("X-Discogs-Ratelimit-Remaining"),
+    }
+
+
+def _apply_discogs_rate_headers(authenticated, scope, headers):
+    if not headers:
+        return
+
+    limit = _safe_int(headers.get("limit"), 0)
+    remaining = _safe_int(headers.get("remaining"), -1)
+
+    if limit > 0:
+        try:
+            redis_conn.setex(
+                discogs_rate_limit_total_key(authenticated, scope),
+                DISCOGS_RATE_WINDOW_SECONDS * 2,
+                str(limit),
+            )
+        except Exception:
+            pass
+
+    if remaining == 0:
+        try:
+            redis_conn.setex(
+                discogs_rate_limit_block_key(authenticated, scope),
+                2,
+                "1",
+            )
+        except Exception:
+            pass
+
+
+def acquire_discogs_rate_limit_slot(authenticated=True, rate_scope="global"):
+    """Block until a shared Discogs rate-limit slot is available."""
+    limit = _read_discogs_dynamic_limit(authenticated, rate_scope)
 
     while True:
-        bucket_key = get_discogs_rate_bucket_key(authenticated)
+        if _should_wait_for_discogs_block(authenticated, rate_scope):
+            time.sleep(0.25)
+            continue
+
+        bucket_key = get_discogs_rate_bucket_key(authenticated, rate_scope)
         try:
             current_count = redis_conn.incr(bucket_key)
             if current_count == 1:
@@ -264,16 +385,24 @@ def acquire_discogs_rate_limit_slot(authenticated=True):
         time.sleep(min(wait_seconds, 5.0))
 
 
-def call_discogs(api_call, authenticated=True):
+def call_discogs(api_call, authenticated=True, rate_scope="global"):
     """Run a Discogs API call under a shared rate limiter with basic 429 retry."""
     last_error = None
 
     for attempt in range(DISCOGS_MAX_RETRIES):
-        acquire_discogs_rate_limit_slot(authenticated=authenticated)
+        acquire_discogs_rate_limit_slot(
+            authenticated=authenticated,
+            rate_scope=rate_scope,
+        )
         call_started_at = time.perf_counter()
 
         try:
             result = api_call()
+            _apply_discogs_rate_headers(
+                authenticated,
+                rate_scope,
+                _extract_discogs_headers_from_client(api_call),
+            )
             record_discogs_api_call(
                 authenticated=authenticated,
                 duration_seconds=time.perf_counter() - call_started_at,
@@ -286,6 +415,11 @@ def call_discogs(api_call, authenticated=True):
                 authenticated=authenticated,
                 duration_seconds=time.perf_counter() - call_started_at,
                 status_code=status_code,
+            )
+            _apply_discogs_rate_headers(
+                authenticated,
+                rate_scope,
+                _extract_discogs_headers_from_http_error(error),
             )
             last_error = error
             if status_code != 429:
@@ -329,6 +463,7 @@ def iter_discogs_paginated_items(
     authenticated=True,
     max_pages=1,
     budget=None,
+    rate_scope="global",
 ):
     """Iterate a Discogs paginated list while rate-limiting each page fetch."""
     max_pages = max(1, int(max_pages))
@@ -340,6 +475,7 @@ def iter_discogs_paginated_items(
         page_items = call_discogs(
             lambda: paginated.page(1),
             authenticated=authenticated,
+            rate_scope=rate_scope,
         )
         for item in page_items:
             yield item
@@ -348,7 +484,11 @@ def iter_discogs_paginated_items(
     if budget and not budget.consume():
         return
 
-    total_pages = call_discogs(lambda: paginated.pages, authenticated=authenticated)
+    total_pages = call_discogs(
+        lambda: paginated.pages,
+        authenticated=authenticated,
+        rate_scope=rate_scope,
+    )
 
     for page_index in range(1, min(total_pages, max_pages) + 1):
         if budget and not budget.consume():
@@ -357,6 +497,7 @@ def iter_discogs_paginated_items(
         page_items = call_discogs(
             lambda page_index=page_index: paginated.page(page_index),
             authenticated=authenticated,
+            rate_scope=rate_scope,
         )
         for item in page_items:
             yield item
@@ -534,7 +675,14 @@ def is_cd_release_result(result):
     return any("cd" in value for value in normalized_formats)
 
 
-def iter_release_candidates(client, artist, title, authenticated=True, budget=None):
+def iter_release_candidates(
+    client,
+    artist,
+    title,
+    authenticated=True,
+    budget=None,
+    rate_scope="global",
+):
     """Yield unique Discogs release candidates from multiple query strategies."""
     primary_artist = primary_artist_name(artist)
     queries = [
@@ -565,6 +713,7 @@ def iter_release_candidates(client, artist, title, authenticated=True, budget=No
             search_results = call_discogs(
                 lambda query=query: client.search(**query),
                 authenticated=authenticated,
+                rate_scope=rate_scope,
             )
         except Exception:
             continue
@@ -575,6 +724,7 @@ def iter_release_candidates(client, artist, title, authenticated=True, budget=No
                 authenticated=authenticated,
                 max_pages=DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY,
                 budget=budget,
+                rate_scope=rate_scope,
             )
         ):
             if index >= 10:
@@ -591,7 +741,13 @@ def iter_release_candidates(client, artist, title, authenticated=True, budget=No
             yield result
 
 
-def find_best_release_match(client, artist, title, authenticated=True):
+def find_best_release_match(
+    client,
+    artist,
+    title,
+    authenticated=True,
+    rate_scope="global",
+):
     """Find the best matching Discogs release for a scanned album entry."""
     best_match = None
     budget = LookupBudget(DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM)
@@ -602,6 +758,7 @@ def find_best_release_match(client, artist, title, authenticated=True):
         title,
         authenticated=authenticated,
         budget=budget,
+        rate_scope=rate_scope,
     ):
         matched_artist, matched_title = parse_release_result(result)
         scores = score_candidate(artist, title, matched_artist, matched_title)
@@ -1295,7 +1452,13 @@ def persist_lookup_result(normalized_key, requested_artist, requested_title, mat
     )
 
 
-def enqueue_album_lookup_job(artist, title, normalized_key):
+def enqueue_album_lookup_job(
+    artist,
+    title,
+    normalized_key,
+    access_token=None,
+    access_token_secret=None,
+):
     pending_key = album_lookup_pending_key(normalized_key)
     existing_job_id = redis_conn.get(pending_key)
     if existing_job_id:
@@ -1311,16 +1474,30 @@ def enqueue_album_lookup_job(artist, title, normalized_key):
         return redis_conn.get(pending_key)
 
     try:
-        job = lookup_queue.enqueue(
-            DISCOGS_LOOKUP_JOB_FUNC,
-            artist,
-            title,
-            normalized_key,
-            job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
-            ttl=DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
-            result_ttl=0,
-            failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
-        )
+        if access_token and access_token_secret:
+            job = lookup_queue.enqueue(
+                run_album_lookup_job_authenticated,
+                artist,
+                title,
+                normalized_key,
+                access_token,
+                access_token_secret,
+                job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
+                ttl=DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
+                result_ttl=0,
+                failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+            )
+        else:
+            job = lookup_queue.enqueue(
+                DISCOGS_LOOKUP_JOB_FUNC,
+                artist,
+                title,
+                normalized_key,
+                job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
+                ttl=DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
+                result_ttl=0,
+                failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+            )
     except Exception:
         redis_conn.delete(pending_key)
         raise
@@ -1546,6 +1723,14 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
 
     worker_available = has_lookup_worker_available()
     queue_saturated = is_lookup_queue_saturated()
+    access_token = None
+    access_token_secret = None
+    try:
+        access_token = session.get("access_token")
+        access_token_secret = session.get("access_token_secret")
+    except RuntimeError:
+        access_token = None
+        access_token_secret = None
 
     # Hybrid strategy: serve lookups synchronously while capacity is available,
     # then overflow additional lookups to the worker queue.
@@ -1560,7 +1745,13 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
 
     if worker_available and not queue_saturated:
         try:
-            enqueue_album_lookup_job(artist, title, normalized_key)
+            enqueue_album_lookup_job(
+                artist,
+                title,
+                normalized_key,
+                access_token=access_token,
+                access_token_secret=access_token_secret,
+            )
         except Exception:
             record_sync_lookup_failure()
             open_lookup_breaker("queue_enqueue_failed")
@@ -1586,7 +1777,13 @@ def run_album_lookup_job(artist, title, normalized_key=None):
 
     try:
         client = get_public_discogs_client()
-        match = find_best_release_match(client, artist, title, authenticated=False)
+        match = find_best_release_match(
+            client,
+            artist,
+            title,
+            authenticated=False,
+            rate_scope="global",
+        )
         return persist_lookup_result(lookup_key, artist, title, match)
     except Exception as error:
         redis_conn.delete(album_lookup_pending_key(lookup_key))
@@ -1607,7 +1804,17 @@ def run_album_lookup_job_authenticated(
     try:
         client = create_discogs_oauth_client()
         client.set_token(access_token, access_token_secret)
-        match = find_best_release_match(client, artist, title, authenticated=True)
+        rate_scope = get_discogs_rate_bucket_scope(
+            authenticated=True,
+            access_token=access_token,
+        )
+        match = find_best_release_match(
+            client,
+            artist,
+            title,
+            authenticated=True,
+            rate_scope=rate_scope,
+        )
         return persist_lookup_result(lookup_key, artist, title, match)
     except Exception as error:
         redis_conn.delete(album_lookup_pending_key(lookup_key))
