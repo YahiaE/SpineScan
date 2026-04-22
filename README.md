@@ -73,6 +73,29 @@ SpineScan uses a split frontend/backend architecture with async workers, Redis c
 
 The project includes a React frontend and a Flask backend with Redis, RQ workers, Supabase, and Discogs OAuth.
 
+## Frontend validation polling
+
+The frontend polls the backend to check validation status after submitting albums for review. The polling strategy uses **adaptive exponential backoff with jitter**:
+
+- Starts at 1 second interval
+- Multiplies interval by 1.5x per attempt (exponential backoff)
+- Capped at 10 seconds maximum
+- Adds 10% random jitter to prevent thundering herd when multiple clients poll simultaneously
+- Maximum 20 attempts (~50-80 seconds total timeout)
+
+This approach reduces unnecessary backend and Redis load while maintaining responsive UX for typical validation times (usually 2-10 seconds per batch).
+
+### Known limitations
+
+**Polling is request-based, not event-driven.** Current implementation relies on frontend polling rather than server-sent events (SSE) or WebSocket. Under high concurrent load (many simultaneous users validating), this creates predictable but unnecessary backend activity. 
+
+**Future improvements:**
+- Implement Server-Sent Events (SSE) for push-based validation status updates
+- Add WebSocket alternative for full-duplex communication
+- These would eliminate polling overhead entirely and provide real-time feedback
+
+For single-user or low-concurrency scenarios, current polling is sufficient and avoids operational complexity of managing persistent connections.
+
 
 
 
