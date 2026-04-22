@@ -1436,10 +1436,6 @@ def enqueue_album_lookup_job(
     access_token_secret=None,
 ):
     pending_key = album_lookup_pending_key(normalized_key)
-    existing_job_id = redis_conn.get(pending_key)
-    if existing_job_id:
-        return existing_job_id
-
     acquired = redis_conn.set(
         pending_key,
         "queued",
@@ -1447,7 +1443,7 @@ def enqueue_album_lookup_job(
         ex=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
     )
     if not acquired:
-        return redis_conn.get(pending_key)
+        return None
 
     try:
         if access_token and access_token_secret:
@@ -1480,6 +1476,30 @@ def enqueue_album_lookup_job(
 
     redis_conn.setex(pending_key, ALBUM_LOOKUP_PENDING_TTL_SECONDS, job.id)
     return job.id
+
+
+def build_lookup_request_context():
+    """Build per-request lookup context so queue/worker checks are not repeated per entry."""
+    worker_available = has_lookup_worker_available()
+    queue_saturated = False
+    if worker_available:
+        queue_saturated = is_lookup_queue_saturated()
+
+    access_token = None
+    access_token_secret = None
+    try:
+        access_token = session.get("access_token")
+        access_token_secret = session.get("access_token_secret")
+    except RuntimeError:
+        pass
+
+    return {
+        "breaker_open": is_lookup_breaker_open(),
+        "worker_available": worker_available,
+        "queue_saturated": queue_saturated,
+        "access_token": access_token,
+        "access_token_secret": access_token_secret,
+    }
 
 
 def has_lookup_worker_available():
@@ -1661,10 +1681,9 @@ def try_run_sync_lookup_with_capacity(artist, title, normalized_key):
         _sync_lookup_slots.release()
 
 
-def resolve_release_match(artist, title, enqueue_if_missing=True):
-    """Resolve an album validation from Redis, Postgres, or the async queue."""
+def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context=None):
+    """Resolve an album validation from Supabase, then sync lookup/queue fallback."""
     normalized_key = album_lookup_normalized_key(artist, title)
-    pending_key = album_lookup_pending_key(normalized_key)
 
     cached_result = read_cached_lookup_result(normalized_key)
     if cached_result:
@@ -1677,36 +1696,18 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
             build_lookup_result_from_row(persisted_row, artist, title),
         )
 
-    pending_marker_exists = False
-    try:
-        pending_marker_exists = bool(redis_conn.get(pending_key))
-    except Exception:
-        pending_marker_exists = False
-
-    if pending_marker_exists:
-        if has_lookup_worker_available():
-            return build_pending_lookup_result()
-        try:
-            redis_conn.delete(pending_key)
-        except Exception:
-            pass
-
     if not enqueue_if_missing:
         return build_pending_lookup_result("Validation has not completed yet")
 
-    if is_lookup_breaker_open():
+    context = lookup_context or build_lookup_request_context()
+
+    if context.get("breaker_open"):
         return build_degraded_lookup_result()
 
-    worker_available = has_lookup_worker_available()
-    queue_saturated = is_lookup_queue_saturated()
-    access_token = None
-    access_token_secret = None
-    try:
-        access_token = session.get("access_token")
-        access_token_secret = session.get("access_token_secret")
-    except RuntimeError:
-        access_token = None
-        access_token_secret = None
+    worker_available = bool(context.get("worker_available"))
+    queue_saturated = bool(context.get("queue_saturated"))
+    access_token = context.get("access_token")
+    access_token_secret = context.get("access_token_secret")
 
     # Hybrid strategy: serve lookups synchronously while capacity is available,
     # then overflow additional lookups to the worker queue.
@@ -1716,8 +1717,13 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
         except RuntimeError as error:
             if str(error) != "sync_lookup_capacity_reached":
                 record_sync_lookup_failure()
+                context["breaker_open"] = is_lookup_breaker_open()
         except Exception:
             record_sync_lookup_failure()
+            context["breaker_open"] = is_lookup_breaker_open()
+
+    if context.get("breaker_open"):
+        return build_degraded_lookup_result()
 
     if worker_available and not queue_saturated:
         try:
@@ -1731,6 +1737,7 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
         except Exception:
             record_sync_lookup_failure()
             open_lookup_breaker("queue_enqueue_failed")
+            context["breaker_open"] = True
             return build_degraded_lookup_result(
                 "Lookup queue unavailable. Please retry shortly."
             )

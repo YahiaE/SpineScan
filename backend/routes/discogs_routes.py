@@ -25,6 +25,7 @@ from services.discogs_service import (
     get_discogs_collection_folders,
     get_discogs_identity,
     get_lookup_queue_stats,
+    build_lookup_request_context,
     is_album_in_collection_cache,
     is_discogs_duplicate_error,
     is_release_in_collection_cache,
@@ -148,6 +149,7 @@ def validate_entries():
     validations = []
     sync_budget = max(0, int(VALIDATE_SYNC_BUDGET))
     sync_budget_used = 0
+    lookup_context = build_lookup_request_context()
 
     for entry in entries:
         entry_id = entry.get("id")
@@ -179,6 +181,7 @@ def validate_entries():
             artist,
             title,
             enqueue_if_missing=not use_sync_path,
+            lookup_context=lookup_context,
         )
         if use_sync_path:
             sync_budget_used += 1
