@@ -219,6 +219,22 @@ export function Review() {
     );
   };
 
+  // Calculate exponential backoff with jitter
+  const calculatePollDelay = (attempt: number): number => {
+    const baseDelay = 1000; // Start at 1 second
+    const multiplier = 1.5; // Exponential multiplier
+    const maxDelay = 10000; // Cap at 10 seconds
+    const jitterFraction = 0.1; // 10% jitter
+
+    const exponentialDelay = Math.min(
+      baseDelay * Math.pow(multiplier, attempt),
+      maxDelay,
+    );
+    const jitterAmount = exponentialDelay * jitterFraction * Math.random();
+
+    return exponentialDelay + jitterAmount;
+  };
+
   useEffect(() => {
     const queuedAlbums = scannedAlbums.filter(
       (album) =>
@@ -241,6 +257,7 @@ export function Review() {
       return;
     }
 
+    const pollDelay = calculatePollDelay(pollAttemptsRef.current);
     const timer = window.setTimeout(() => {
       pollAttemptsRef.current += 1;
       void requestValidation(
@@ -251,7 +268,7 @@ export function Review() {
         })),
         { background: true },
       );
-    }, 2500);
+    }, pollDelay);
 
     return () => {
       window.clearTimeout(timer);
