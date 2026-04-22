@@ -835,69 +835,7 @@ def serialize_album_identity_key(album_key):
     return f"{artist_key}::{title_key}"
 
 
-def _collection_release_cache_key(discogs_username, folder_id):
-    return (
-        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
-        f"{discogs_username}:{int(folder_id)}:release_ids"
-    )
 
-
-def _collection_album_cache_key(discogs_username, folder_id):
-    return (
-        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
-        f"{discogs_username}:{int(folder_id)}:album_keys"
-    )
-
-
-
-
-
-def _set_collection_cache_expiry(discogs_username, folder_id):
-    """Set TTL on Redis collection cache sets."""
-    release_key = _collection_release_cache_key(discogs_username, folder_id)
-    album_key = _collection_album_cache_key(discogs_username, folder_id)
-    redis_conn.expire(release_key, COLLECTION_CACHE_TTL_SECONDS)
-    redis_conn.expire(album_key, COLLECTION_CACHE_TTL_SECONDS)
-
-
-def _collection_cache_exists_in_supabase(discogs_username, folder_id):
-    """Check if collection cache has been populated for this user/folder in Supabase."""
-    try:
-        result = (
-            supabase.table("discogs_collection_cache")
-            .select("release_id", count="exact")
-            .eq("discogs_username", discogs_username)
-            .eq("folder_id", int(folder_id))
-            .limit(1)
-            .execute()
-        )
-        return result.count is not None and result.count > 0
-    except Exception as error:
-        print(f"Failed to check collection cache in Supabase: {error}")
-        return False
-
-
-def _load_collection_cache_from_supabase(discogs_username, folder_id):
-    """Load persisted collection cache from Supabase into Redis sets."""
-    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
-    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
-
-    try:
-        result = (
-            supabase.table("discogs_collection_cache")
-            .select("release_id,album_key")
-            .eq("discogs_username", discogs_username)
-            .eq("folder_id", int(folder_id))
-            .execute()
-        )
-
-        if result.data:
-            for row in result.data:
-                redis_conn.sadd(release_set_key, str(int(row["release_id"])))
-                redis_conn.sadd(album_set_key, row["album_key"])
-            _set_collection_cache_expiry(discogs_username, folder_id)
-    except Exception as error:
-        print(f"Failed to load collection cache from Supabase: {error}")
 
 
 def _upsert_albums_from_collection_cache(rows_by_key):
@@ -1019,31 +957,13 @@ def _mirror_albums_from_durable_collection_cache(discogs_username, folder_id):
     _upsert_albums_from_collection_cache(album_rows_by_key)
 
 
-def ensure_collection_membership_cache_warm(client, discogs_username, folder):
-    """Hydrate Redis and durable Supabase membership cache from Discogs."""
+def refresh_collection_cache_from_discogs(client, discogs_username, folder):
+    """Refresh Supabase collection cache from current Discogs folder state."""
     folder_id = int(folder.id)
-    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
-    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
-
-    # Check if Redis sets are already populated in this session
-    release_count = redis_conn.scard(release_set_key)
-    album_count = redis_conn.scard(album_set_key)
-
-    if release_count > 0 or album_count > 0:
-        # Redis already warmed in this session, just ensure TTL is set
-        _set_collection_cache_expiry(discogs_username, folder_id)
-        return
-
-    # Check if collection cache exists in durable Supabase storage
-    if _collection_cache_exists_in_supabase(discogs_username, folder_id):
-        # Load from Supabase into Redis and mirror to albums table
-        _load_collection_cache_from_supabase(discogs_username, folder_id)
-        _mirror_albums_from_durable_collection_cache(discogs_username, folder_id)
-        return
-
-    # Not in Redis or Supabase, fetch fresh from Discogs
     durable_rows_by_release = {}
     album_rows_by_key = {}
+
+    # Fetch fresh collection from Discogs
     for item in iter_discogs_paginated_items(
         folder.releases,
         authenticated=True,
@@ -1062,8 +982,6 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
 
         album_key = album_identity_key(release_artist_name, release_title)
         serialized_album_key = serialize_album_identity_key(album_key)
-        redis_conn.sadd(release_set_key, str(int(release_id)))
-        redis_conn.sadd(album_set_key, serialized_album_key)
         durable_rows_by_release[int(release_id)] = {
             "discogs_username": discogs_username,
             "folder_id": folder_id,
@@ -1079,9 +997,8 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
             "updated_at": utc_timestamp(),
         }
 
-    # Persist to durable Supabase storage
+    # Persist to Supabase only (no Redis)
     durable_rows = list(durable_rows_by_release.values())
-
     if durable_rows:
         try:
             (
@@ -1093,11 +1010,23 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
                 .execute()
             )
         except Exception as error:
-            print(f"Failed to backfill durable collection cache: {error}")
+            print(f"Failed to refresh collection cache: {error}")
 
-    # Mirror to albums lookup table and set TTL
+    # Mirror to albums lookup table
     _upsert_albums_from_collection_cache(album_rows_by_key)
-    _set_collection_cache_expiry(discogs_username, folder_id)
+
+
+def ensure_collection_membership_cache_warm(client, discogs_username, folder):
+    """Refresh collection cache from Discogs for the selected folder.
+    
+    This updates Supabase with the latest collection state when the user
+    selects a folder for import, ensuring duplicate checks are always current.
+    """
+    try:
+        refresh_collection_cache_from_discogs(client, discogs_username, folder)
+    except Exception as error:
+        # Non-fatal: duplicate detection falls back to API response
+        print(f"Collection cache refresh failed: {error}")
 
 
 def cache_collection_membership_entry(
@@ -1106,16 +1035,13 @@ def cache_collection_membership_entry(
     release_id,
     album_key,
 ):
-    """Write-through membership cache for fast duplicate checks in imports."""
+    """Update collection cache entry in Supabase after successful import.
+    
+    This persists the album to the collection cache so future imports
+    can detect duplicates against Supabase directly (no Redis involved).
+    """
     normalized_release_id = int(release_id)
     serialized_album_key = serialize_album_identity_key(album_key)
-
-    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
-    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
-
-    redis_conn.sadd(release_set_key, str(normalized_release_id))
-    redis_conn.sadd(album_set_key, serialized_album_key)
-    _set_collection_cache_expiry(discogs_username, folder_id)
 
     try:
         (
@@ -1132,6 +1058,8 @@ def cache_collection_membership_entry(
             )
             .execute()
         )
+    except Exception as error:
+        print(f"Failed to update collection cache: {error}")
 
     _upsert_albums_from_collection_cache(
         {
@@ -1164,11 +1092,8 @@ def mirror_collection_cache_entry_to_albums(release_id, album_key):
 
 
 def is_release_in_collection_cache(discogs_username, folder_id, release_id):
-    """Return True when release membership is already known for this folder."""
+    """Return True when release is already in the collection (queried from Supabase)."""
     normalized_release_id = int(release_id)
-    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
-    if redis_conn.sismember(release_set_key, str(normalized_release_id)):
-        return True
 
     try:
         response = (
@@ -1182,23 +1107,15 @@ def is_release_in_collection_cache(discogs_username, folder_id, release_id):
         )
         rows = getattr(response, "data", None) or []
     except Exception as error:
-        print(f"Failed to read release membership cache: {error}")
+        print(f"Failed to check release in collection cache: {error}")
         return False
 
-    if not rows:
-        return False
-
-    redis_conn.sadd(release_set_key, str(normalized_release_id))
-    _set_collection_cache_expiry(discogs_username, folder_id)
-    return True
+    return bool(rows)
 
 
 def is_album_in_collection_cache(discogs_username, folder_id, album_key):
-    """Return True when a normalized album identity is already known in folder."""
+    """Return True when album is already in the collection (queried from Supabase)."""
     serialized_album_key = serialize_album_identity_key(album_key)
-    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
-    if redis_conn.sismember(album_set_key, serialized_album_key):
-        return True
 
     try:
         response = (
@@ -1212,15 +1129,10 @@ def is_album_in_collection_cache(discogs_username, folder_id, album_key):
         )
         rows = getattr(response, "data", None) or []
     except Exception as error:
-        print(f"Failed to read album membership cache: {error}")
+        print(f"Failed to check album in collection cache: {error}")
         return False
 
-    if not rows:
-        return False
-
-    redis_conn.sadd(album_set_key, serialized_album_key)
-    _set_collection_cache_expiry(discogs_username, folder_id)
-    return True
+    return bool(rows)
 
 
 def is_discogs_duplicate_error(error):
