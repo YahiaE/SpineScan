@@ -159,6 +159,23 @@ def metrics():
     lines.append("# TYPE spinescan_lookup_queue_depth gauge")
     lines.append(f"spinescan_lookup_queue_depth {queue_stats['queued_jobs']}")
 
+    lines.append(
+        "# HELP spinescan_lookup_oldest_queued_job_age_seconds Oldest queued lookup job age"
+    )
+    lines.append("# TYPE spinescan_lookup_oldest_queued_job_age_seconds gauge")
+    lines.append(
+        "spinescan_lookup_oldest_queued_job_age_seconds "
+        f"{float(queue_stats.get('oldest_queued_job_age_seconds', 0.0)):.3f}"
+    )
+
+    lines.append(
+        "# HELP spinescan_lookup_stale_jobs_dropped Number of stale lookup jobs dropped during stats collection"
+    )
+    lines.append("# TYPE spinescan_lookup_stale_jobs_dropped gauge")
+    lines.append(
+        f"spinescan_lookup_stale_jobs_dropped {int(queue_stats.get('stale_jobs_dropped', 0))}"
+    )
+
     lines.append("# HELP spinescan_lookup_started_jobs Lookup started jobs")
     lines.append("# TYPE spinescan_lookup_started_jobs gauge")
     lines.append(f"spinescan_lookup_started_jobs {queue_stats['started_jobs']}")

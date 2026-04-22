@@ -34,6 +34,7 @@ from config import (
     DISCOGS_LOOKUP_JOB_FUNC,
     DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
     DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM,
+    DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
     DISCOGS_LOOKUP_MAX_QUEUE_DEPTH,
     DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY,
     DISCOGS_LOOKUP_MAX_STARTED_JOBS,
@@ -187,11 +188,17 @@ def build_degraded_lookup_result(
 
 
 def open_lookup_breaker(reason, ttl_seconds=DISCOGS_LOOKUP_BREAKER_TTL_SECONDS):
-    redis_conn.setex(lookup_breaker_key(), max(1, int(ttl_seconds)), reason)
+    try:
+        redis_conn.setex(lookup_breaker_key(), max(1, int(ttl_seconds)), reason)
+    except Exception:
+        pass
 
 
 def get_lookup_breaker_reason():
-    return redis_conn.get(lookup_breaker_key())
+    try:
+        return redis_conn.get(lookup_breaker_key())
+    except Exception:
+        return None
 
 
 def is_lookup_breaker_open():
@@ -199,24 +206,30 @@ def is_lookup_breaker_open():
 
 
 def record_discogs_429():
-    streak = redis_conn.incr(lookup_429_streak_key())
-    if streak == 1:
-        redis_conn.expire(lookup_429_streak_key(), DISCOGS_RATE_WINDOW_SECONDS)
+    try:
+        streak = redis_conn.incr(lookup_429_streak_key())
+        if streak == 1:
+            redis_conn.expire(lookup_429_streak_key(), DISCOGS_RATE_WINDOW_SECONDS)
 
-    if streak >= DISCOGS_LOOKUP_429_BREAK_THRESHOLD:
-        open_lookup_breaker("discogs_429")
+        if streak >= DISCOGS_LOOKUP_429_BREAK_THRESHOLD:
+            open_lookup_breaker("discogs_429")
+    except Exception:
+        pass
 
 
 def record_sync_lookup_failure():
-    failure_count = redis_conn.incr(lookup_sync_failures_key())
-    if failure_count == 1:
-        redis_conn.expire(
-            lookup_sync_failures_key(),
-            DISCOGS_LOOKUP_BREAKER_TTL_SECONDS,
-        )
+    try:
+        failure_count = redis_conn.incr(lookup_sync_failures_key())
+        if failure_count == 1:
+            redis_conn.expire(
+                lookup_sync_failures_key(),
+                DISCOGS_LOOKUP_BREAKER_TTL_SECONDS,
+            )
 
-    if failure_count >= DISCOGS_LOOKUP_SYNC_FAILURE_THRESHOLD:
-        open_lookup_breaker("sync_lookup_failure")
+        if failure_count >= DISCOGS_LOOKUP_SYNC_FAILURE_THRESHOLD:
+            open_lookup_breaker("sync_lookup_failure")
+    except Exception:
+        pass
 
 
 def acquire_discogs_rate_limit_slot(authenticated=True):
@@ -227,14 +240,21 @@ def acquire_discogs_rate_limit_slot(authenticated=True):
 
     while True:
         bucket_key = get_discogs_rate_bucket_key(authenticated)
-        current_count = redis_conn.incr(bucket_key)
-        if current_count == 1:
-            redis_conn.expire(bucket_key, DISCOGS_RATE_WINDOW_SECONDS * 2)
+        try:
+            current_count = redis_conn.incr(bucket_key)
+            if current_count == 1:
+                redis_conn.expire(bucket_key, DISCOGS_RATE_WINDOW_SECONDS * 2)
+        except Exception:
+            # Redis unavailable: fail open so Discogs calls can still proceed.
+            return
 
         if current_count <= limit:
             return
 
-        redis_conn.decr(bucket_key)
+        try:
+            redis_conn.decr(bucket_key)
+        except Exception:
+            return
         wait_seconds = max(
             0.25,
             DISCOGS_RATE_WINDOW_SECONDS
@@ -1067,24 +1087,30 @@ def is_discogs_duplicate_error(error):
 
 
 def build_import_request_fingerprint(folder_id, entries):
-    """Build a stable fingerprint for import idempotency."""
+    """Build a stable fingerprint for import idempotency.
+
+    Prefer Discogs release IDs so inline artist/title edits do not bypass
+    idempotency checks and trigger duplicate imports.
+    """
     normalized_entries = []
     for entry in entries:
+        raw_release_id = str(entry.get("release_id", "")).strip()
+        try:
+            normalized_release_id = str(int(raw_release_id)) if raw_release_id else ""
+        except (TypeError, ValueError):
+            normalized_release_id = ""
+
         normalized_entries.append(
             {
                 "id": str(entry.get("id", "")).strip(),
-                "artist": str(entry.get("artist", "")).strip().lower(),
-                "title": str(entry.get("title", "")).strip().lower(),
-                "release_id": str(entry.get("release_id", "")).strip(),
+                "release_id": normalized_release_id,
             }
         )
 
     normalized_entries.sort(
         key=lambda item: (
-            item["id"],
-            item["artist"],
-            item["title"],
             item["release_id"],
+            item["id"],
         )
     )
 
@@ -1149,14 +1175,22 @@ def build_lookup_result_from_row(row, fallback_artist, fallback_title):
 
 
 def read_cached_lookup_result(normalized_key):
-    payload = redis_conn.get(album_lookup_cache_key(normalized_key))
+    try:
+        payload = redis_conn.get(album_lookup_cache_key(normalized_key))
+    except Exception:
+        # Redis unavailable: treat as cache miss and continue with fallback paths.
+        return None
+
     if not payload:
         return None
 
     try:
         return json.loads(payload)
     except json.JSONDecodeError:
-        redis_conn.delete(album_lookup_cache_key(normalized_key))
+        try:
+            redis_conn.delete(album_lookup_cache_key(normalized_key))
+        except Exception:
+            pass
         return None
 
 
@@ -1171,12 +1205,17 @@ def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
 
     effective_ttl = ttl_seconds or ALBUM_LOOKUP_CACHE_TTL_SECONDS
 
-    redis_conn.setex(
-        album_lookup_cache_key(normalized_key),
-        effective_ttl,
-        json.dumps(cacheable_result),
-    )
-    redis_conn.delete(album_lookup_pending_key(normalized_key))
+    try:
+        redis_conn.setex(
+            album_lookup_cache_key(normalized_key),
+            effective_ttl,
+            json.dumps(cacheable_result),
+        )
+        redis_conn.delete(album_lookup_pending_key(normalized_key))
+    except Exception:
+        # Redis unavailable: still return the computed result to the caller.
+        pass
+
     return cacheable_result
 
 
@@ -1278,6 +1317,7 @@ def enqueue_album_lookup_job(artist, title, normalized_key):
             title,
             normalized_key,
             job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
+            ttl=DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
             result_ttl=0,
             failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
         )
@@ -1300,21 +1340,90 @@ def has_lookup_worker_available():
 
 def count_lookup_pending_markers():
     """Count Redis pending markers used to deduplicate lookup jobs."""
+    try:
+        markers = redis_conn.scan_iter(
+            match=f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:*"
+        )
+    except Exception:
+        return 0
+
     count = 0
-    for _ in redis_conn.scan_iter(
-        match=f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:*"
-    ):
+    for _ in markers:
         count += 1
     return count
 
 
+def _seconds_since(timestamp, now_utc):
+    if not timestamp:
+        return None
+
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+    return max(0.0, (now_utc - timestamp).total_seconds())
+
+
+def _drop_stale_lookup_jobs(max_age_seconds):
+    """Remove stale queued/started jobs so they fail explicitly instead of lingering."""
+    now_utc = datetime.now(timezone.utc)
+    removed = 0
+
+    try:
+        for job in lookup_queue.jobs:
+            age_seconds = _seconds_since(getattr(job, "enqueued_at", None), now_utc)
+            if age_seconds is None or age_seconds <= max_age_seconds:
+                continue
+
+            try:
+                job.cancel()
+                job.delete()
+                removed += 1
+            except Exception:
+                continue
+    except Exception:
+        return removed
+
+    try:
+        started_registry = StartedJobRegistry(queue=lookup_queue)
+        for job_id in started_registry.get_job_ids():
+            job = lookup_queue.fetch_job(job_id)
+            if not job:
+                continue
+
+            age_seconds = _seconds_since(getattr(job, "started_at", None), now_utc)
+            if age_seconds is None or age_seconds <= max_age_seconds:
+                continue
+
+            try:
+                job.cancel()
+                job.delete()
+                removed += 1
+            except Exception:
+                continue
+    except Exception:
+        return removed
+
+    return removed
+
+
 def get_lookup_queue_stats():
     """Collect queue and worker telemetry for the validation pipeline."""
+    max_job_age_seconds = max(60, int(DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS))
+    stale_jobs_dropped = _drop_stale_lookup_jobs(max_job_age_seconds)
+
     workers = Worker.all(connection=lookup_queue.connection, queue=lookup_queue)
     started_registry = StartedJobRegistry(queue=lookup_queue)
     failed_registry = FailedJobRegistry(queue=lookup_queue)
     finished_registry = FinishedJobRegistry(queue=lookup_queue)
     deferred_registry = DeferredJobRegistry(queue=lookup_queue)
+
+    now_utc = datetime.now(timezone.utc)
+    oldest_queued_job_age_seconds = 0.0
+    for job in lookup_queue.jobs:
+        age_seconds = _seconds_since(getattr(job, "enqueued_at", None), now_utc)
+        if age_seconds is None:
+            continue
+        oldest_queued_job_age_seconds = max(oldest_queued_job_age_seconds, age_seconds)
 
     return {
         "queue_name": lookup_queue.name,
@@ -1325,6 +1434,9 @@ def get_lookup_queue_stats():
         "finished_jobs": len(finished_registry),
         "deferred_jobs": len(deferred_registry),
         "pending_markers": count_lookup_pending_markers(),
+        "oldest_queued_job_age_seconds": oldest_queued_job_age_seconds,
+        "max_job_age_seconds": max_job_age_seconds,
+        "stale_jobs_dropped": stale_jobs_dropped,
         "sync_fallback_active": len(workers) == 0,
         "lookup_breaker_open": is_lookup_breaker_open(),
         "lookup_breaker_reason": get_lookup_breaker_reason(),
@@ -1412,10 +1524,19 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
             build_lookup_result_from_row(persisted_row, artist, title),
         )
 
-    if redis_conn.get(pending_key):
+    pending_marker_exists = False
+    try:
+        pending_marker_exists = bool(redis_conn.get(pending_key))
+    except Exception:
+        pending_marker_exists = False
+
+    if pending_marker_exists:
         if has_lookup_worker_available():
             return build_pending_lookup_result()
-        redis_conn.delete(pending_key)
+        try:
+            redis_conn.delete(pending_key)
+        except Exception:
+            pass
 
     if not enqueue_if_missing:
         return build_pending_lookup_result("Validation has not completed yet")
@@ -1443,7 +1564,9 @@ def resolve_release_match(artist, title, enqueue_if_missing=True):
         except Exception:
             record_sync_lookup_failure()
             open_lookup_breaker("queue_enqueue_failed")
-            return build_degraded_lookup_result()
+            return build_degraded_lookup_result(
+                "Lookup queue unavailable. Please retry shortly."
+            )
 
         return build_pending_lookup_result()
 
