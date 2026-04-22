@@ -87,18 +87,27 @@ export function Scan() {
       | TorchCapableTrack
       | undefined;
 
-    if (!track || !supportsTorch(track)) {
+    if (!track?.applyConstraints || !supportsTorch(track)) {
       setTorchSupported(false);
       setTorchEnabled(false);
       return;
     }
 
-    // This toggle arms flash for capture only (camera-like), not continuous torch.
-    setTorchEnabled((current) => !current);
-    setCaptureError(null);
+    const nextTorchState = !torchEnabled;
+
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: nextTorchState } as MediaTrackConstraintSet],
+      });
+      setTorchEnabled(nextTorchState);
+      setCaptureError(null);
+    } catch {
+      setCaptureError("Flash is not available on this camera.");
+      setTorchEnabled(false);
+    }
   };
 
-  const handleCapture = async () => {
+  const handleCapture = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
@@ -115,33 +124,9 @@ export function Scan() {
       return;
     }
 
-    const track = streamRef.current?.getVideoTracks?.()[0] as
-      | TorchCapableTrack
-      | undefined;
-    const shouldFlashOnCapture =
-      torchEnabled && Boolean(track?.applyConstraints) && supportsTorch(track);
-
-    if (shouldFlashOnCapture) {
-      try {
-        await track!.applyConstraints?.({
-          advanced: [{ torch: true } as MediaTrackConstraintSet],
-        });
-        // Give hardware a brief moment to apply brightness before drawing frame.
-        await new Promise((resolve) => window.setTimeout(resolve, 110));
-      } catch {
-        setCaptureError("Flash is not available on this camera.");
-      }
-    }
-
     canvas.width = width;
     canvas.height = height;
     canvas.getContext("2d")!.drawImage(video, 0, 0);
-
-    if (shouldFlashOnCapture) {
-      void track?.applyConstraints?.({
-        advanced: [{ torch: false } as MediaTrackConstraintSet],
-      });
-    }
 
     canvas.toBlob(
       (blob) => {
@@ -261,7 +246,7 @@ export function Scan() {
             type="button"
             title={
               torchSupported
-                ? "Toggle flash for capture"
+                ? "Toggle camera flash"
                 : "Flash is not supported in this browser"
             }
           >
