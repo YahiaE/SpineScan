@@ -9,7 +9,8 @@ const API_BASE = "/api";
 
 export function Processing() {
   const navigate = useNavigate();
-  const { capturedImage, setCapturedImage, setScannedAlbums } = useAppContext();
+  const { capturedImage, setCapturedImage, setScannedAlbums, setSkippedLines } =
+    useAppContext();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -57,13 +58,24 @@ export function Processing() {
           );
         }
 
-        const parsed = resultText
+        const allLines = resultText
           .split(/\r?\n/)
+          .filter((line: string) => line.trim().length > 0);
+
+        const skipped: string[] = [];
+        const parsed = allLines
           .filter((entry: string) => {
-            if (!entry.includes(" - ")) return false;
+            if (!entry.includes(" - ")) {
+              skipped.push(entry.trim());
+              return false;
+            }
             // Reject prose lines (sentences masquerading as Artist - Album)
             const wordCount = entry.trim().split(/\s+/).length;
-            return wordCount <= 12;
+            if (wordCount > 12) {
+              skipped.push(entry.trim());
+              return false;
+            }
+            return true;
           })
           .map((entry: string, i: number) => {
             const sep = entry.indexOf(" - ");
@@ -87,6 +99,7 @@ export function Processing() {
           );
         }
 
+        setSkippedLines(skipped);
         setScannedAlbums(parsed);
         navigate("/review");
       } catch (e) {

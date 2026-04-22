@@ -6,8 +6,9 @@ import { useState } from "react";
 import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
-const EXCHANGE_RETRY_COUNT = 8;
-const EXCHANGE_RETRY_DELAY_MS = 800;
+const EXCHANGE_RETRY_COUNT = 20;
+const EXCHANGE_RETRY_BASE_DELAY_MS = 800;
+const EXCHANGE_RETRY_MAX_DELAY_MS = 5000;
 
 type AuthStep = "idle" | "requesting" | "authorizing" | "exchanging" | "error";
 
@@ -24,9 +25,7 @@ export function Welcome() {
     setError(null);
 
     try {
-      const res = await apiFetch(`${API_BASE}/auth/request_token`, {
-
-      });
+      const res = await apiFetch(`${API_BASE}/auth/request_token`, {});
       if (!res.ok) throw new Error("Failed to get request token");
       const { authorize_url, oauth_token } = await res.json();
 
@@ -66,9 +65,7 @@ export function Welcome() {
       for (let attempt = 0; attempt < EXCHANGE_RETRY_COUNT; attempt += 1) {
         res = await apiFetch(
           `${API_BASE}/auth/access_token?oauth_token=${encodeURIComponent(oauthToken)}`,
-          {
-
-          },
+          {},
         );
 
         if (res.ok) break;
@@ -76,9 +73,11 @@ export function Welcome() {
         payload = await res.json().catch(() => null);
         if (res.status !== 409) break;
 
-        await new Promise((resolve) =>
-          setTimeout(resolve, EXCHANGE_RETRY_DELAY_MS),
+        const delay = Math.min(
+          EXCHANGE_RETRY_BASE_DELAY_MS * 2 ** attempt,
+          EXCHANGE_RETRY_MAX_DELAY_MS,
         );
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
 
       if (!res) {

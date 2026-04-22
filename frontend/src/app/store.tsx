@@ -1,4 +1,12 @@
-import { createContext, useContext, useState, ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  ReactNode,
+} from "react";
+
+const SCAN_HISTORY_STORAGE_KEY = "spinescan:scanHistory";
 
 export interface AlbumValidation {
   status: "pending" | "valid" | "invalid";
@@ -60,6 +68,8 @@ interface AppState {
   setSelectedCollectionId: (folderId: number | null) => void;
   lastImportSummary: ImportSummary | null;
   setLastImportSummary: (summary: ImportSummary | null) => void;
+  skippedLines: string[];
+  setSkippedLines: (lines: string[]) => void;
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -67,7 +77,14 @@ const AppContext = createContext<AppState | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [isConnected, setConnected] = useState(false);
   const [scannedAlbums, setScannedAlbums] = useState<Album[]>([]);
-  const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>([]);
+  const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>(() => {
+    try {
+      const stored = localStorage.getItem(SCAN_HISTORY_STORAGE_KEY);
+      return stored ? (JSON.parse(stored) as ScanHistoryEntry[]) : [];
+    } catch {
+      return [];
+    }
+  });
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [collectionFolders, setCollectionFolders] = useState<
     CollectionFolder[]
@@ -77,6 +94,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   >(null);
   const [lastImportSummary, setLastImportSummary] =
     useState<ImportSummary | null>(null);
+  const [skippedLines, setSkippedLines] = useState<string[]>([]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SCAN_HISTORY_STORAGE_KEY,
+        JSON.stringify(scanHistory),
+      );
+    } catch {
+      // localStorage may be unavailable (private browsing quota exceeded, etc.)
+    }
+  }, [scanHistory]);
 
   const addHistory = (entry: Omit<ScanHistoryEntry, "date">) => {
     setScanHistory((prev) => [
@@ -102,6 +131,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setSelectedCollectionId,
         lastImportSummary,
         setLastImportSummary,
+        skippedLines,
+        setSkippedLines,
       }}
     >
       {children}

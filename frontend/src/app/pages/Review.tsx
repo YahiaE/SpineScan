@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { CollectionFolder, useAppContext } from "../store";
 import {
@@ -38,6 +38,7 @@ export function Review() {
     setCollectionFolders,
     selectedCollectionId,
     setSelectedCollectionId,
+    skippedLines,
   } = useAppContext();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editArtist, setEditArtist] = useState("");
@@ -46,6 +47,9 @@ export function Review() {
   const [folderError, setFolderError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [validating, setValidating] = useState(false);
+  const [pollTimedOut, setPollTimedOut] = useState(false);
+  const pollAttemptsRef = useRef(0);
+  const [showSkipped, setShowSkipped] = useState(false);
 
   const applyValidationPayload = (payload: ValidationResponse) => {
     const validationMap = new Map(
@@ -117,9 +121,10 @@ export function Review() {
       setFolderError(null);
 
       try {
-        const res = await apiFetch(`${API_BASE}/discogs/collection-folders`, {
-
-        });
+        const res = await apiFetch(
+          `${API_BASE}/discogs/collection-folders`,
+          {},
+        );
 
         if (!res.ok) {
           const payload = await res.json().catch(() => null);
@@ -202,7 +207,8 @@ export function Review() {
 
   const validateAlbums = async () => {
     if (scannedAlbums.length === 0) return;
-
+    pollAttemptsRef.current = 0;
+    setPollTimedOut(false);
     await requestValidation(
       scannedAlbums.map((album) => ({
         id: album.id,
@@ -219,11 +225,23 @@ export function Review() {
         Boolean(album.validation.message),
     );
 
-    if (queuedAlbums.length === 0 || validating) {
+    if (queuedAlbums.length === 0) {
+      pollAttemptsRef.current = 0;
+      setPollTimedOut(false);
+      return;
+    }
+
+    if (validating || pollTimedOut) {
+      return;
+    }
+
+    if (pollAttemptsRef.current >= 20) {
+      setPollTimedOut(true);
       return;
     }
 
     const timer = window.setTimeout(() => {
+      pollAttemptsRef.current += 1;
       void requestValidation(
         queuedAlbums.map((album) => ({
           id: album.id,
@@ -237,7 +255,7 @@ export function Review() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [scannedAlbums, validating]);
+  }, [scannedAlbums, validating, pollTimedOut]);
 
   const removeInvalid = () => {
     setScannedAlbums(
@@ -280,6 +298,57 @@ export function Review() {
         <p className="text-neutral-400 text-sm">
           Review and correct any errors.
         </p>
+
+        {pollTimedOut && (
+          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 flex items-start gap-3">
+            <ShieldAlert className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-yellow-300 text-sm font-medium">
+                Validation is taking longer than expected
+              </p>
+              <p className="text-yellow-400/70 text-xs mt-0.5">
+                The lookup worker may be busy. You can proceed with valid items
+                or{" "}
+                <button
+                  onClick={validateAlbums}
+                  className="underline hover:text-yellow-300 transition-colors"
+                >
+                  retry validation
+                </button>
+                .
+              </p>
+            </div>
+          </div>
+        )}
+
+        {skippedLines.length > 0 && (
+          <div className="bg-neutral-900 border border-neutral-700 rounded-xl p-3">
+            <button
+              onClick={() => setShowSkipped((v) => !v)}
+              className="w-full flex items-center justify-between text-left"
+            >
+              <span className="text-neutral-400 text-sm">
+                {skippedLines.length} line
+                {skippedLines.length !== 1 ? "s" : ""} skipped by OCR parser
+              </span>
+              <span className="text-neutral-500 text-xs">
+                {showSkipped ? "hide" : "show"}
+              </span>
+            </button>
+            {showSkipped && (
+              <ul className="mt-2 space-y-1">
+                {skippedLines.map((line, i) => (
+                  <li
+                    key={i}
+                    className="text-neutral-500 text-xs font-mono truncate"
+                  >
+                    {line}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 space-y-4">
           <div>
