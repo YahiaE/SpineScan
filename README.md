@@ -58,9 +58,9 @@ SpineScan uses a split frontend/backend architecture with async workers, Redis c
 	- Import history service persists and reads durable import summaries.
 
 - Data and queue components
-	- Redis (Upstash-compatible): rate-limit buckets, pending markers, collection membership sets, lookup breaker state, and idempotency keys.
+	- Redis (Upstash-compatible): transient rate-limit buckets, pending lookup markers, collection membership sets, and lookup circuit-breaker flags.
 	- RQ workers: async Discogs lookup jobs for cache misses.
-	- Supabase Postgres: persisted capture manifests, collection membership cache rows, album lookup data, and import history.
+	- Supabase Postgres: persisted capture manifests, collection membership cache (per-user per-folder), album lookup data, and import history.
 	- Supabase Storage: uploaded capture images.
 
 ## Repository layout

@@ -57,6 +57,29 @@ python main.py
 python worker.py
 ```
 
+## Collection membership cache flow
+
+Before importing albums, the backend warms a per-user, per-folder membership cache:
+
+1. **Session cache hit**: Redis sets are already populated (same import session).
+   - Just refresh TTL and proceed. Fast path.
+
+2. **Durable cache hit**: Collection cache exists in Supabase.
+   - Load persisted release IDs and album keys from Supabase into Redis.
+   - Mirror to albums lookup table for fast duplicate detection.
+   - Typical case for returning users or repeated imports.
+
+3. **Cache miss**: First import or after Supabase cache expiry.
+   - Fetch full collection from Discogs API (paginated, up to 5 pages).
+   - Store release IDs and album keys in Redis (session) and Supabase (persistent).
+   - Mirror to albums lookup table for deduplication.
+
+This split architecture ensures:
+- **Fast warm-up** for repeat users (Supabase → Redis load).
+- **Durable sharing** across sessions (Supabase is persistent).
+- **Efficient deduplication** during imports (Redis sets for membership tests).
+- **Single source of truth**: Supabase, not Redis markers.
+
 ## Discogs lookup tuning
 
 Lookup misses can fan out into multiple Discogs calls. The backend now supports
