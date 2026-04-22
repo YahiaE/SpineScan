@@ -21,7 +21,6 @@ from rq.registry import (
 )
 
 from config import (
-    ALBUM_LOOKUP_CACHE_TTL_SECONDS,
     ALBUM_LOOKUP_CACHE_VERSION,
     ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS,
     ALBUM_LOOKUP_PENDING_TTL_SECONDS,
@@ -1293,10 +1292,6 @@ def album_lookup_normalized_key(artist, title):
     return f"{normalized_artist}::{normalized_title}"
 
 
-def album_lookup_cache_key(normalized_key):
-    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:{normalized_key}"
-
-
 def album_lookup_pending_key(normalized_key):
     return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:{normalized_key}"
 
@@ -1332,23 +1327,9 @@ def build_lookup_result_from_row(row, fallback_artist, fallback_title):
 
 
 def read_cached_lookup_result(normalized_key):
-    try:
-        payload = redis_conn.get(album_lookup_cache_key(normalized_key))
-    except Exception:
-        # Redis unavailable: treat as cache miss and continue with fallback paths.
-        return None
-
-    if not payload:
-        return None
-
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        try:
-            redis_conn.delete(album_lookup_cache_key(normalized_key))
-        except Exception:
-            pass
-        return None
+    # Album lookup cache is now durable-only via Supabase `albums`.
+    # Redis remains in use for pending markers, rate limiting, and queue state.
+    return None
 
 
 def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
@@ -1360,14 +1341,9 @@ def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
         "matched_title": result.get("matched_title"),
     }
 
-    effective_ttl = ttl_seconds or ALBUM_LOOKUP_CACHE_TTL_SECONDS
-
     try:
-        redis_conn.setex(
-            album_lookup_cache_key(normalized_key),
-            effective_ttl,
-            json.dumps(cacheable_result),
-        )
+        # Keep pending-marker cleanup in Redis so queued lookups can be deduplicated,
+        # but do not write hot lookup results to Redis.
         redis_conn.delete(album_lookup_pending_key(normalized_key))
     except Exception:
         # Redis unavailable: still return the computed result to the caller.
