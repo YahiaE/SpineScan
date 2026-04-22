@@ -1,6 +1,7 @@
 import os
 
 from flask import Blueprint, session, request
+from rq import Retry
 
 from config import (
     ALLOWED_MIME,
@@ -29,6 +30,7 @@ from services.storage_service import (
     verify_capture_signature,
     with_temp_file_from_bytes,
 )
+from extensions import lookup_queue
 from services.discogs_service import (
     get_discogs_client,
     get_discogs_collection_folders,
@@ -53,18 +55,56 @@ def _capture_scope_candidates(access_token):
 
 def _read_verified_capture_bytes(record):
     """Verify the signed manifest before reading bytes so routes share one trust path."""
+    file_bytes = download_capture_from_bucket(record.get("object_key"))
+    computed_checksum = build_capture_checksum(file_bytes)
+    manifest_checksum = str(record.get("checksum_sha256") or "")
+
+    if manifest_checksum and computed_checksum != manifest_checksum:
+        raise PermissionError("Capture checksum verification failed")
+
     is_valid_signature = verify_capture_signature(
         user_scope=record.get("user_scope"),
         object_key=record.get("object_key"),
-        checksum=record.get("checksum_sha256"),
+        checksum=computed_checksum,
         signature=record.get("signature"),
     )
     if not is_valid_signature:
         raise PermissionError("Capture ownership signature is invalid")
 
-    file_bytes = download_capture_from_bucket(record.get("object_key"))
     suffix = os.path.splitext(record.get("object_key"))[1] or ".jpg"
     return file_bytes, suffix
+
+
+def finalize_capture_cleanup_job(capture):
+    """Delete capture object/manifest with retries from the worker queue."""
+    try:
+        delete_capture_from_bucket(capture.get("object_key"))
+    except Exception:
+        # Retry policy is handled by RQ; raise so the job can be retried/logged.
+        raise
+
+    if capture.get("id") is not None:
+        try:
+            mark_capture_manifest_status(capture.get("id"), "deleted")
+        except Exception:
+            pass
+        try:
+            delete_capture_manifest_record(capture.get("id"))
+        except Exception:
+            pass
+    else:
+        try:
+            delete_capture_manifest_records_by_object_key(
+                capture.get("user_scope"),
+                capture.get("object_key"),
+            )
+        except Exception:
+            pass
+
+    return {
+        "deleted": True,
+        "object_key": capture.get("object_key"),
+    }
 
 
 def _find_capture_for_cleanup(access_token, requested_path=None):
@@ -421,32 +461,25 @@ def finalize_capture():
             return {"error": "Capture ownership signature is invalid"}, 403
 
     try:
-        delete_capture_from_bucket(capture.get("object_key"))
+        cleanup_job = lookup_queue.enqueue(
+            "routes.data_routes.finalize_capture_cleanup_job",
+            capture,
+            retry=Retry(max=3, interval=[30, 120, 300]),
+            job_timeout=60,
+            result_ttl=0,
+            failure_ttl=60 * 60 * 24,
+        )
+        return {
+            "deleted": False,
+            "queued": True,
+            "cleanup_job_id": cleanup_job.id,
+            "object_key": capture.get("object_key"),
+        }, 202
     except Exception:
-        pass
-
-    if capture.get("id") is not None:
-        try:
-            mark_capture_manifest_status(capture.get("id"), "deleted")
-        except Exception:
-            pass
-        try:
-            delete_capture_manifest_record(capture.get("id"))
-        except Exception:
-            pass
-    else:
-        try:
-            delete_capture_manifest_records_by_object_key(
-                capture.get("user_scope"),
-                capture.get("object_key"),
-            )
-        except Exception:
-            pass
-
-    return {
-        "deleted": True,
-        "object_key": capture.get("object_key"),
-    }, 200
+        # If queueing fails, perform a best-effort synchronous cleanup.
+        result = finalize_capture_cleanup_job(capture)
+        result["queued"] = False
+        return result, 200
 
 
 @data_bp.route("/data/albums", methods=["GET"])
