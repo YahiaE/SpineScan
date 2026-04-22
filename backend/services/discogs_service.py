@@ -849,38 +849,55 @@ def _collection_album_cache_key(discogs_username, folder_id):
     )
 
 
-def _collection_warm_marker_key(discogs_username, folder_id):
-    return (
-        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
-        f"{discogs_username}:{int(folder_id)}:warmed"
-    )
 
-
-def _collection_durable_marker_key(discogs_username, folder_id):
-    return (
-        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
-        f"{discogs_username}:{int(folder_id)}:durable"
-    )
-
-
-def _collection_albums_marker_key(discogs_username, folder_id):
-    return (
-        f"discogs:collection:{COLLECTION_CACHE_VERSION}:"
-        f"{discogs_username}:{int(folder_id)}:albums_mirrored"
-    )
 
 
 def _set_collection_cache_expiry(discogs_username, folder_id):
+    """Set TTL on Redis collection cache sets."""
     release_key = _collection_release_cache_key(discogs_username, folder_id)
     album_key = _collection_album_cache_key(discogs_username, folder_id)
-    warm_marker_key = _collection_warm_marker_key(discogs_username, folder_id)
-    durable_marker_key = _collection_durable_marker_key(discogs_username, folder_id)
-    albums_marker_key = _collection_albums_marker_key(discogs_username, folder_id)
     redis_conn.expire(release_key, COLLECTION_CACHE_TTL_SECONDS)
     redis_conn.expire(album_key, COLLECTION_CACHE_TTL_SECONDS)
-    redis_conn.expire(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS)
-    redis_conn.expire(durable_marker_key, COLLECTION_CACHE_TTL_SECONDS)
-    redis_conn.expire(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS)
+
+
+def _collection_cache_exists_in_supabase(discogs_username, folder_id):
+    """Check if collection cache has been populated for this user/folder in Supabase."""
+    try:
+        result = (
+            supabase.table("discogs_collection_cache")
+            .select("release_id", count="exact")
+            .eq("discogs_username", discogs_username)
+            .eq("folder_id", int(folder_id))
+            .limit(1)
+            .execute()
+        )
+        return result.count is not None and result.count > 0
+    except Exception as error:
+        print(f"Failed to check collection cache in Supabase: {error}")
+        return False
+
+
+def _load_collection_cache_from_supabase(discogs_username, folder_id):
+    """Load persisted collection cache from Supabase into Redis sets."""
+    release_set_key = _collection_release_cache_key(discogs_username, folder_id)
+    album_set_key = _collection_album_cache_key(discogs_username, folder_id)
+
+    try:
+        result = (
+            supabase.table("discogs_collection_cache")
+            .select("release_id,album_key")
+            .eq("discogs_username", discogs_username)
+            .eq("folder_id", int(folder_id))
+            .execute()
+        )
+
+        if result.data:
+            for row in result.data:
+                redis_conn.sadd(release_set_key, str(int(row["release_id"])))
+                redis_conn.sadd(album_set_key, row["album_key"])
+            _set_collection_cache_expiry(discogs_username, folder_id)
+    except Exception as error:
+        print(f"Failed to load collection cache from Supabase: {error}")
 
 
 def _upsert_albums_from_collection_cache(rows_by_key):
@@ -1007,28 +1024,24 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
     folder_id = int(folder.id)
     release_set_key = _collection_release_cache_key(discogs_username, folder_id)
     album_set_key = _collection_album_cache_key(discogs_username, folder_id)
-    warm_marker_key = _collection_warm_marker_key(discogs_username, folder_id)
-    durable_marker_key = _collection_durable_marker_key(discogs_username, folder_id)
-    albums_marker_key = _collection_albums_marker_key(discogs_username, folder_id)
 
-    warm_marker_exists = bool(redis_conn.get(warm_marker_key))
-    durable_marker_exists = bool(redis_conn.get(durable_marker_key))
-
-    if warm_marker_exists and durable_marker_exists:
-        _mirror_albums_from_durable_collection_cache(discogs_username, folder_id)
-        redis_conn.setex(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
-        return
-
+    # Check if Redis sets are already populated in this session
     release_count = redis_conn.scard(release_set_key)
     album_count = redis_conn.scard(album_set_key)
-    if (release_count > 0 or album_count > 0) and durable_marker_exists:
-        _mirror_albums_from_durable_collection_cache(discogs_username, folder_id)
-        redis_conn.setex(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
-        redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
+
+    if release_count > 0 or album_count > 0:
+        # Redis already warmed in this session, just ensure TTL is set
         _set_collection_cache_expiry(discogs_username, folder_id)
         return
 
-    warmed_entries = 0
+    # Check if collection cache exists in durable Supabase storage
+    if _collection_cache_exists_in_supabase(discogs_username, folder_id):
+        # Load from Supabase into Redis and mirror to albums table
+        _load_collection_cache_from_supabase(discogs_username, folder_id)
+        _mirror_albums_from_durable_collection_cache(discogs_username, folder_id)
+        return
+
+    # Not in Redis or Supabase, fetch fresh from Discogs
     durable_rows_by_release = {}
     album_rows_by_key = {}
     for item in iter_discogs_paginated_items(
@@ -1065,8 +1078,8 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
             "discogs_release_id": int(release_id),
             "updated_at": utc_timestamp(),
         }
-        warmed_entries += 1
 
+    # Persist to durable Supabase storage
     durable_rows = list(durable_rows_by_release.values())
 
     if durable_rows:
@@ -1079,19 +1092,12 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
                 )
                 .execute()
             )
-            redis_conn.setex(durable_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
         except Exception as error:
             print(f"Failed to backfill durable collection cache: {error}")
 
+    # Mirror to albums lookup table and set TTL
     _upsert_albums_from_collection_cache(album_rows_by_key)
-    redis_conn.setex(albums_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
-
-    redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
     _set_collection_cache_expiry(discogs_username, folder_id)
-
-    if warmed_entries == 0:
-        # Keep an empty-folder marker so we do not re-fetch on every import.
-        redis_conn.setex(warm_marker_key, COLLECTION_CACHE_TTL_SECONDS, "1")
 
 
 def cache_collection_membership_entry(
@@ -1126,13 +1132,6 @@ def cache_collection_membership_entry(
             )
             .execute()
         )
-        redis_conn.setex(
-            _collection_durable_marker_key(discogs_username, folder_id),
-            COLLECTION_CACHE_TTL_SECONDS,
-            "1",
-        )
-    except Exception as error:
-        print(f"Failed to persist collection cache entry: {error}")
 
     _upsert_albums_from_collection_cache(
         {
