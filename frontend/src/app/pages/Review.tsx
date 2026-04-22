@@ -8,6 +8,7 @@ import {
   ArrowRight,
   ShieldCheck,
   ShieldAlert,
+  Loader2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { apiFetch } from "../apiClient";
@@ -274,6 +275,16 @@ export function Review() {
     scannedAlbums.length > 0 &&
     selectedCollectionId !== null &&
     scannedAlbums.every((album) => album.validation?.status === "valid");
+  const totalCount = scannedAlbums.length;
+  const resolvedCount = validCount + invalidCount;
+  const progressPercent =
+    totalCount > 0 ? Math.round((resolvedCount / totalCount) * 100) : 0;
+  const queuedPendingCount = scannedAlbums.filter(
+    (album) =>
+      album.validation?.status === "pending" &&
+      Boolean(album.validation?.message),
+  ).length;
+  const verificationActive = validating || queuedPendingCount > 0;
 
   const selectedFolderName =
     collectionFolders.find((folder) => folder.id === selectedCollectionId)
@@ -385,6 +396,41 @@ export function Review() {
               {pendingCount} pending
             </span>
           </div>
+
+          {totalCount > 0 && (
+            <div className="rounded-xl border border-neutral-800 bg-neutral-950/80 p-3 space-y-2">
+              <div className="flex items-center justify-between text-xs text-neutral-400">
+                <div className="flex items-center gap-2">
+                  {verificationActive && (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                  )}
+                  <span>
+                    {verificationActive
+                      ? "Verifying titles"
+                      : pendingCount === 0
+                        ? "Verification complete"
+                        : "Ready to validate"}
+                  </span>
+                </div>
+                <span>
+                  {resolvedCount}/{totalCount} ({progressPercent}%)
+                </span>
+              </div>
+
+              <div className="h-2 w-full rounded-full bg-neutral-800 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${verificationActive ? "bg-emerald-500" : "bg-emerald-600"}`}
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+
+              <p className="text-xs text-neutral-500">
+                {pendingCount === 0
+                  ? "All titles have a final validation result."
+                  : `${pendingCount} title${pendingCount === 1 ? " is" : "s are"} still pending validation.`}
+              </p>
+            </div>
+          )}
 
           <div className="flex gap-3">
             <button
