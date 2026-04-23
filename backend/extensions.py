@@ -6,6 +6,7 @@ from config import (
     DISCOGS_LOOKUP_QUEUE,
     REDIS_HEALTH_CHECK_INTERVAL,
     REDIS_HOST,
+    REDIS_MAX_CONNECTIONS,
     REDIS_PORT,
     REDIS_RETRY_ON_TIMEOUT,
     REDIS_SOCKET_KEEPALIVE,
@@ -20,32 +21,36 @@ _redis_common_kwargs = {
     "socket_keepalive": REDIS_SOCKET_KEEPALIVE,
     "health_check_interval": REDIS_HEALTH_CHECK_INTERVAL,
     "retry_on_timeout": REDIS_RETRY_ON_TIMEOUT,
+    "max_connections": REDIS_MAX_CONNECTIONS,
 }
 
 if REDIS_URL:
-    redis_conn = redis.from_url(
+    _redis_decoded_pool = redis.ConnectionPool.from_url(
         REDIS_URL,
         decode_responses=True,
         **_redis_common_kwargs,
     )
-    rq_redis_conn = redis.from_url(
+    _redis_binary_pool = redis.ConnectionPool.from_url(
         REDIS_URL,
         decode_responses=False,
         **_redis_common_kwargs,
     )
 else:
-    redis_conn = redis.Redis(
+    _redis_decoded_pool = redis.ConnectionPool(
         host=REDIS_HOST,
         port=REDIS_PORT,
         decode_responses=True,
         **_redis_common_kwargs,
     )
-    rq_redis_conn = redis.Redis(
+    _redis_binary_pool = redis.ConnectionPool(
         host=REDIS_HOST,
         port=REDIS_PORT,
         decode_responses=False,
         **_redis_common_kwargs,
     )
+
+redis_conn = redis.Redis(connection_pool=_redis_decoded_pool)
+rq_redis_conn = redis.Redis(connection_pool=_redis_binary_pool)
 
 lookup_queue = Queue(DISCOGS_LOOKUP_QUEUE, connection=rq_redis_conn)
 

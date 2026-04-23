@@ -72,7 +72,7 @@ def callback():
     if oauth_token and oauth_verifier:
         updated_in_redis = False
         try:
-            if redis_conn.hgetall(oauth_token):
+            if redis_conn.hexists(oauth_token, "request_token_secret"):
                 redis_conn.hset(oauth_token, "oauth_verifier", oauth_verifier)
                 updated_in_redis = True
         except Exception:
@@ -118,7 +118,17 @@ def exchange_access_token():
     token_data = {}
     if oauth_token:
         try:
-            token_data = redis_conn.hgetall(oauth_token) or {}
+            request_token_secret, oauth_verifier = redis_conn.hmget(
+                oauth_token,
+                ["request_token_secret", "oauth_verifier"],
+            )
+            if request_token_secret or oauth_verifier:
+                token_data = {
+                    "request_token_secret": request_token_secret or "",
+                    "oauth_verifier": oauth_verifier or "",
+                }
+            else:
+                token_data = {}
         except Exception:
             token_data = {}
 

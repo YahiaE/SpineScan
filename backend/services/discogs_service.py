@@ -386,7 +386,17 @@ def _get_auth_session_token_data(auth_session_id):
         return token_data
 
     auth_key = _auth_session_key(auth_session_id)
-    token_data = redis_conn.hgetall(auth_key) or {}
+    access_token, access_token_secret, discogs_username = redis_conn.hmget(
+        auth_key,
+        ["access_token", "access_token_secret", "discogs_username"],
+    )
+    token_data = {}
+    if access_token or access_token_secret or discogs_username:
+        token_data = {
+            "access_token": access_token or "",
+            "access_token_secret": access_token_secret or "",
+            "discogs_username": discogs_username or "",
+        }
     _set_cached_auth_session_data(auth_session_id, token_data)
     return token_data
 
