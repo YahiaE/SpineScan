@@ -9,15 +9,27 @@ from datetime import datetime
 from typing import Optional
 
 import requests
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 
 from services.startup_tracker import mark_warm
 
 
 logger = logging.getLogger(__name__)
 
-_scheduler: Optional[BackgroundScheduler] = None
+_scheduler: Optional["BackgroundScheduler"] = None
+_apscheduler_available = False
+
+# Try to import APScheduler; it may not be available during early deployment stages
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+    _apscheduler_available = True
+except ImportError:
+    BackgroundScheduler = None
+    IntervalTrigger = None
+    logger.warning(
+        "APScheduler not installed. Scheduler will be disabled. "
+        "Install 'APScheduler' to enable periodic health checks."
+    )
 
 
 def _ping_health_endpoint():
@@ -61,6 +73,13 @@ def init_scheduler(app=None):
         app: Flask app instance (optional, for logging context)
     """
     global _scheduler
+
+    if not _apscheduler_available:
+        logger.warning(
+            "APScheduler not available. Skipping scheduler initialization. "
+            "Periodic health checks will not run."
+        )
+        return None
 
     if _scheduler is not None and _scheduler.running:
         logger.info("Scheduler already initialized and running")
@@ -108,6 +127,6 @@ def stop_scheduler():
             _scheduler = None
 
 
-def get_scheduler() -> Optional[BackgroundScheduler]:
+def get_scheduler():
     """Get the current scheduler instance."""
     return _scheduler
