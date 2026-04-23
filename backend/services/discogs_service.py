@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import secrets
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -61,6 +62,15 @@ _discogs_calls_authenticated_total = 0
 _discogs_calls_unauthenticated_total = 0
 _discogs_rate_limited_429_total = 0
 _discogs_errors_total = 0
+_AUTH_SESSION_REDIS_PREFIX = "discogs:auth-session:v1"
+
+try:
+    _AUTH_SESSION_TTL_SECONDS = max(
+        300,
+        int(os.getenv("AUTH_SESSION_TTL_SECONDS", "86400")),
+    )
+except (TypeError, ValueError):
+    _AUTH_SESSION_TTL_SECONDS = 86400
 
 
 def _quantile(values, quantile):
@@ -119,10 +129,128 @@ def get_discogs_call_metrics():
     }
 
 
+def _auth_session_key(auth_session_id):
+    return f"{_AUTH_SESSION_REDIS_PREFIX}:{auth_session_id}"
+
+
+def _get_or_create_auth_session_id():
+    auth_session_id = session.get("auth_session_id")
+    if auth_session_id:
+        return auth_session_id
+
+    auth_session_id = secrets.token_urlsafe(32)
+    session["auth_session_id"] = auth_session_id
+    return auth_session_id
+
+
+def persist_discogs_auth_tokens(access_token, access_token_secret, discogs_username):
+    """Persist Discogs auth server-side and keep only opaque id in cookie session."""
+    auth_session_id = _get_or_create_auth_session_id()
+    auth_key = _auth_session_key(auth_session_id)
+
+    redis_conn.hset(
+        auth_key,
+        mapping={
+            "access_token": access_token,
+            "access_token_secret": access_token_secret,
+            "discogs_username": discogs_username or "",
+            "updated_at": utc_timestamp(),
+        },
+    )
+    redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
+
+    # Keep non-sensitive username in session for existing flow compatibility.
+    session["discogs_username"] = discogs_username
+
+    # Remove legacy token fields from cookie-backed session.
+    session.pop("access_token", None)
+    session.pop("access_token_secret", None)
+
+
+def get_discogs_auth_tokens():
+    """Read Discogs auth from Redis by opaque auth-session id."""
+    try:
+        auth_session_id = session.get("auth_session_id")
+        if auth_session_id:
+            auth_key = _auth_session_key(auth_session_id)
+            token_data = redis_conn.hgetall(auth_key) or {}
+            access_token = token_data.get("access_token")
+            access_token_secret = token_data.get("access_token_secret")
+            if access_token and access_token_secret:
+                redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
+                return access_token, access_token_secret
+
+        return None, None
+    except RuntimeError:
+        return None, None
+
+
+def get_discogs_auth_session_status():
+    """Return non-sensitive status details for auth-session observability."""
+    try:
+        auth_session_id = session.get("auth_session_id")
+        session_username = session.get("discogs_username")
+        legacy_cookie_fields_present = bool(
+            session.get("access_token") or session.get("access_token_secret")
+        )
+
+        if not auth_session_id:
+            return {
+                "source": "none",
+                "authorized": False,
+                "has_auth_session_id": False,
+                "redis_record_found": False,
+                "legacy_cookie_fields_present": legacy_cookie_fields_present,
+                "discogs_username": session_username,
+            }
+
+        auth_key = _auth_session_key(auth_session_id)
+        token_data = redis_conn.hgetall(auth_key) or {}
+        has_tokens = bool(
+            token_data.get("access_token") and token_data.get("access_token_secret")
+        )
+
+        if token_data:
+            redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
+
+        return {
+            "source": "redis" if has_tokens else "none",
+            "authorized": has_tokens,
+            "has_auth_session_id": True,
+            "redis_record_found": bool(token_data),
+            "legacy_cookie_fields_present": legacy_cookie_fields_present,
+            "discogs_username": token_data.get("discogs_username") or session_username,
+        }
+    except RuntimeError:
+        return {
+            "source": "none",
+            "authorized": False,
+            "has_auth_session_id": False,
+            "redis_record_found": False,
+            "legacy_cookie_fields_present": False,
+            "discogs_username": None,
+        }
+    except Exception:
+        return {
+            "source": "error",
+            "authorized": False,
+            "has_auth_session_id": bool(session.get("auth_session_id")),
+            "redis_record_found": False,
+            "legacy_cookie_fields_present": bool(
+                session.get("access_token") or session.get("access_token_secret")
+            ),
+            "discogs_username": session.get("discogs_username"),
+        }
+
+
+def get_discogs_access_token():
+    access_token, _ = get_discogs_auth_tokens()
+    return access_token
+
+
 def get_discogs_client():
     """Create an authenticated Discogs client from the current session."""
-    access_token = session.get("access_token")
-    access_token_secret = session.get("access_token_secret")
+    access_token, access_token_secret = get_discogs_auth_tokens()
 
     if not access_token or not access_token_secret:
         raise ValueError("User not authenticated")
@@ -835,9 +963,6 @@ def serialize_album_identity_key(album_key):
     return f"{artist_key}::{title_key}"
 
 
-
-
-
 def _upsert_albums_from_collection_cache(rows_by_key):
     """Mirror unique cached collection entries into the albums lookup table."""
     if not rows_by_key:
@@ -1018,7 +1143,7 @@ def refresh_collection_cache_from_discogs(client, discogs_username, folder):
 
 def ensure_collection_membership_cache_warm(client, discogs_username, folder):
     """Refresh collection cache from Discogs for the selected folder.
-    
+
     This updates Supabase with the latest collection state when the user
     selects a folder for import, ensuring duplicate checks are always current.
     """
@@ -1036,7 +1161,7 @@ def cache_collection_membership_entry(
     album_key,
 ):
     """Update collection cache entry in Supabase after successful import.
-    
+
     This persists the album to the collection cache so future imports
     can detect duplicates against Supabase directly (no Redis involved).
     """
@@ -1399,8 +1524,7 @@ def build_lookup_request_context():
     access_token = None
     access_token_secret = None
     try:
-        access_token = session.get("access_token")
-        access_token_secret = session.get("access_token_secret")
+        access_token, access_token_secret = get_discogs_auth_tokens()
     except RuntimeError:
         pass
 
@@ -1550,8 +1674,7 @@ def run_sync_lookup_with_timeout(artist, title, normalized_key):
     access_token = None
     access_token_secret = None
     try:
-        access_token = session.get("access_token")
-        access_token_secret = session.get("access_token_secret")
+        access_token, access_token_secret = get_discogs_auth_tokens()
     except RuntimeError:
         # No request context (for example tests/background calls), so fallback to public lookup.
         pass

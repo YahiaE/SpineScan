@@ -5,7 +5,12 @@ from flask import Blueprint, jsonify, request, session
 
 from config import BASE_URL
 from extensions import redis_conn
-from services.discogs_service import call_discogs, create_discogs_oauth_client
+from services.discogs_service import (
+    call_discogs,
+    create_discogs_oauth_client,
+    get_discogs_auth_session_status,
+    persist_discogs_auth_tokens,
+)
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 
@@ -36,6 +41,7 @@ def get_request_token():
                     "created_at": time.time(),
                 },
             )
+            redis_conn.expire(request_token, 600)
         except Exception:
             pending = _get_oauth_pending_state()
             pending[request_token] = {
@@ -46,7 +52,6 @@ def get_request_token():
             session["oauth_pending"] = pending
 
         session["request_token"] = request_token
-        session["request_token_secret"] = request_token_secret
 
         return jsonify(
             {
@@ -140,9 +145,11 @@ def exchange_access_token():
         d.set_token(access_token, access_token_secret)
         identity = call_discogs(d.identity, authenticated=True)
 
-        session["access_token"] = access_token
-        session["access_token_secret"] = access_token_secret
-        session["discogs_username"] = getattr(identity, "username", None)
+        persist_discogs_auth_tokens(
+            access_token,
+            access_token_secret,
+            getattr(identity, "username", None),
+        )
 
         try:
             redis_conn.delete(oauth_token)
@@ -154,6 +161,8 @@ def exchange_access_token():
             pending.pop(oauth_token, None)
             session["oauth_pending"] = pending
 
+        session.pop("request_token_secret", None)
+
         return jsonify(
             {
                 "authorized": True,
@@ -162,3 +171,10 @@ def exchange_access_token():
         )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@auth_bp.route("/session-source", methods=["GET"])
+def auth_session_source():
+    """Return non-sensitive auth session source details for migration checks."""
+    status = get_discogs_auth_session_status()
+    return jsonify(status), 200

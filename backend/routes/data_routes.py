@@ -32,6 +32,7 @@ from services.storage_service import (
 )
 from extensions import lookup_queue
 from services.discogs_service import (
+    get_discogs_access_token,
     get_discogs_client,
     get_discogs_collection_folders,
     get_discogs_identity,
@@ -145,7 +146,7 @@ def _find_capture_for_cleanup(access_token, requested_path=None):
 @data_bp.route("/data/capture-debug", methods=["GET"])
 def capture_debug():
     """Debug endpoint for capture lookup path (scope, manifest, bucket visibility)."""
-    access_token = session.get("access_token")
+    access_token = get_discogs_access_token()
     if not access_token:
         return {"error": "User not authenticated"}, 401
 
@@ -187,7 +188,7 @@ def capture_debug():
 def upload_image():
     """Upload an image to Supabase Storage and persist signed capture metadata."""
     try:
-        access_token = session.get("access_token")
+        access_token = get_discogs_access_token()
         if not access_token:
             raise ValueError("User not authenticated")
     except ValueError:
@@ -252,7 +253,7 @@ def scan_image():
     if not body or "path" not in body:
         return {"error": "Missing 'path' in request body"}, 400
 
-    access_token = session.get("access_token")
+    access_token = get_discogs_access_token()
     if not access_token:
         return {"error": "User not authenticated"}, 401
 
@@ -286,7 +287,7 @@ def scan_image():
 def process_latest_image():
     """Process the most recently uploaded capture for the authenticated user."""
     try:
-        access_token = session.get("access_token")
+        access_token = get_discogs_access_token()
         if not access_token:
             raise ValueError("User not authenticated")
     except ValueError:
@@ -437,7 +438,7 @@ def process_latest_image():
 @data_bp.route("/data/capture/finalize", methods=["POST"])
 def finalize_capture():
     """Delete a processed/uploaded capture once the flow is complete."""
-    access_token = session.get("access_token")
+    access_token = get_discogs_access_token()
     if not access_token:
         return {"error": "User not authenticated"}, 401
 
