@@ -46,6 +46,13 @@ if not SUPABASE_SECRET_KEY:
 REDIS_URL = os.getenv("UPSTASH_REDIS_URL") or os.getenv("REDIS_URL")
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_SOCKET_KEEPALIVE = (
+    os.getenv("REDIS_SOCKET_KEEPALIVE", "true").strip().lower() == "true"
+)
+REDIS_HEALTH_CHECK_INTERVAL = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL", "30"))
+REDIS_RETRY_ON_TIMEOUT = (
+    os.getenv("REDIS_RETRY_ON_TIMEOUT", "true").strip().lower() == "true"
+)
 DISCOGS_LOOKUP_QUEUE = os.getenv("DISCOGS_LOOKUP_QUEUE", "discogs-lookups")
 
 DISCOGS_RATE_WINDOW_SECONDS = 60

@@ -13,6 +13,7 @@ from threading import BoundedSemaphore, Lock
 import discogs_client
 from discogs_client.exceptions import HTTPError
 from flask import session
+from redis.exceptions import NoScriptError
 from rq import Worker
 from rq.registry import (
     DeferredJobRegistry,
@@ -79,6 +80,47 @@ try:
     )
 except (TypeError, ValueError):
     _AUTH_SESSION_REFRESH_INTERVAL_SECONDS = 1800
+
+try:
+    _AUTH_SESSION_LOCAL_CACHE_TTL_SECONDS = max(
+        5,
+        int(os.getenv("AUTH_SESSION_LOCAL_CACHE_TTL_SECONDS", "30")),
+    )
+except (TypeError, ValueError):
+    _AUTH_SESSION_LOCAL_CACHE_TTL_SECONDS = 30
+
+try:
+    _AUTH_SESSION_LOCAL_CACHE_MISS_TTL_SECONDS = max(
+        1,
+        int(os.getenv("AUTH_SESSION_LOCAL_CACHE_MISS_TTL_SECONDS", "5")),
+    )
+except (TypeError, ValueError):
+    _AUTH_SESSION_LOCAL_CACHE_MISS_TTL_SECONDS = 5
+
+try:
+    _LOOKUP_STATS_CACHE_TTL_SECONDS = max(
+        1,
+        int(os.getenv("LOOKUP_STATS_CACHE_TTL_SECONDS", "2")),
+    )
+except (TypeError, ValueError):
+    _LOOKUP_STATS_CACHE_TTL_SECONDS = 2
+
+try:
+    _STALE_JOB_SWEEP_INTERVAL_SECONDS = max(
+        5,
+        int(os.getenv("STALE_JOB_SWEEP_INTERVAL_SECONDS", "30")),
+    )
+except (TypeError, ValueError):
+    _STALE_JOB_SWEEP_INTERVAL_SECONDS = 30
+
+_auth_session_local_cache = {}
+_auth_session_local_cache_lock = Lock()
+_discogs_rate_limit_acquire_script_sha = None
+_discogs_rate_limit_script_lock = Lock()
+_lookup_stats_cache = {"value": None, "expires_at": 0.0}
+_lookup_stats_cache_lock = Lock()
+_last_stale_job_sweep_at = 0.0
+_stale_job_sweep_lock = Lock()
 
 _DISCogs_RATE_LIMIT_ACQUIRE_SCRIPT = """
 local configured_limit = tonumber(redis.call('GET', KEYS[1]) or ARGV[1])
@@ -193,6 +235,14 @@ def persist_discogs_auth_tokens(access_token, access_token_secret, discogs_usern
     )
     redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
     session["auth_session_ttl_refreshed_at"] = time.time()
+    _set_cached_auth_session_data(
+        auth_session_id,
+        {
+            "access_token": access_token,
+            "access_token_secret": access_token_secret,
+            "discogs_username": discogs_username or "",
+        },
+    )
 
     # Keep non-sensitive username in session for existing flow compatibility.
     session["discogs_username"] = discogs_username
@@ -208,7 +258,7 @@ def get_discogs_auth_tokens():
         auth_session_id = session.get("auth_session_id")
         if auth_session_id:
             auth_key = _auth_session_key(auth_session_id)
-            token_data = redis_conn.hgetall(auth_key) or {}
+            token_data = _get_auth_session_token_data(auth_session_id)
             access_token = token_data.get("access_token")
             access_token_secret = token_data.get("access_token_secret")
             if access_token and access_token_secret:
@@ -240,7 +290,7 @@ def get_discogs_auth_session_status():
             }
 
         auth_key = _auth_session_key(auth_session_id)
-        token_data = redis_conn.hgetall(auth_key) or {}
+        token_data = _get_auth_session_token_data(auth_session_id)
         has_tokens = bool(
             token_data.get("access_token") and token_data.get("access_token_secret")
         )
@@ -300,6 +350,45 @@ def _refresh_auth_session_ttl_if_needed(auth_key):
 
     redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
     session["auth_session_ttl_refreshed_at"] = now
+
+
+def _set_cached_auth_session_data(auth_session_id, token_data):
+    now = time.time()
+    ttl_seconds = (
+        _AUTH_SESSION_LOCAL_CACHE_TTL_SECONDS
+        if token_data
+        else _AUTH_SESSION_LOCAL_CACHE_MISS_TTL_SECONDS
+    )
+    with _auth_session_local_cache_lock:
+        _auth_session_local_cache[auth_session_id] = {
+            "token_data": token_data,
+            "expires_at": now + ttl_seconds,
+        }
+
+
+def _get_cached_auth_session_data(auth_session_id):
+    now = time.time()
+    with _auth_session_local_cache_lock:
+        cached_entry = _auth_session_local_cache.get(auth_session_id)
+        if not cached_entry:
+            return None
+
+        if cached_entry.get("expires_at", 0) <= now:
+            _auth_session_local_cache.pop(auth_session_id, None)
+            return None
+
+        return cached_entry.get("token_data") or {}
+
+
+def _get_auth_session_token_data(auth_session_id):
+    token_data = _get_cached_auth_session_data(auth_session_id)
+    if token_data is not None:
+        return token_data
+
+    auth_key = _auth_session_key(auth_session_id)
+    token_data = redis_conn.hgetall(auth_key) or {}
+    _set_cached_auth_session_data(auth_session_id, token_data)
+    return token_data
 
 
 def get_discogs_client():
@@ -455,9 +544,7 @@ def _try_acquire_discogs_rate_limit_slot(authenticated, rate_scope):
     ]
     args = [default_limit, DISCOGS_RATE_WINDOW_SECONDS * 2]
 
-    result = redis_conn.eval(
-        _DISCogs_RATE_LIMIT_ACQUIRE_SCRIPT, len(keys), *keys, *args
-    )
+    result = _eval_discogs_rate_limit_script(keys, args)
     granted = bool(int(result[0]))
     blocked = bool(int(result[1]))
     limit = _safe_int(result[2], default_limit)
@@ -468,6 +555,38 @@ def _try_acquire_discogs_rate_limit_slot(authenticated, rate_scope):
         "limit": limit,
         "current_count": current_count,
     }
+
+
+def _get_discogs_rate_limit_script_sha():
+    global _discogs_rate_limit_acquire_script_sha
+
+    with _discogs_rate_limit_script_lock:
+        if _discogs_rate_limit_acquire_script_sha:
+            return _discogs_rate_limit_acquire_script_sha
+
+        _discogs_rate_limit_acquire_script_sha = redis_conn.script_load(
+            _DISCogs_RATE_LIMIT_ACQUIRE_SCRIPT
+        )
+        return _discogs_rate_limit_acquire_script_sha
+
+
+def _eval_discogs_rate_limit_script(keys, args):
+    script_sha = _get_discogs_rate_limit_script_sha()
+
+    try:
+        return redis_conn.evalsha(script_sha, len(keys), *keys, *args)
+    except NoScriptError:
+        pass
+    except Exception as error:
+        if "NOSCRIPT" not in str(error).upper():
+            raise
+
+    global _discogs_rate_limit_acquire_script_sha
+    with _discogs_rate_limit_script_lock:
+        _discogs_rate_limit_acquire_script_sha = None
+
+    script_sha = _get_discogs_rate_limit_script_sha()
+    return redis_conn.evalsha(script_sha, len(keys), *keys, *args)
 
 
 def _extract_discogs_headers_from_http_error(error):
@@ -1645,11 +1764,23 @@ def _seconds_since(timestamp, now_utc):
 
 def _drop_stale_lookup_jobs(max_age_seconds):
     """Remove stale queued/started jobs so they fail explicitly instead of lingering."""
+    global _last_stale_job_sweep_at
+
+    now = time.time()
+    with _stale_job_sweep_lock:
+        if now - _last_stale_job_sweep_at < _STALE_JOB_SWEEP_INTERVAL_SECONDS:
+            return 0
+        _last_stale_job_sweep_at = now
+
     now_utc = datetime.now(timezone.utc)
     removed = 0
 
     try:
-        for job in lookup_queue.jobs:
+        for job_id in lookup_queue.job_ids:
+            job = lookup_queue.fetch_job(job_id)
+            if not job:
+                continue
+
             age_seconds = _seconds_since(getattr(job, "enqueued_at", None), now_utc)
             if age_seconds is None or age_seconds <= max_age_seconds:
                 continue
@@ -1686,8 +1817,7 @@ def _drop_stale_lookup_jobs(max_age_seconds):
     return removed
 
 
-def get_lookup_queue_stats():
-    """Collect queue and worker telemetry for the validation pipeline."""
+def _collect_lookup_queue_stats_uncached():
     max_job_age_seconds = max(60, int(DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS))
     stale_jobs_dropped = _drop_stale_lookup_jobs(max_job_age_seconds)
 
@@ -1699,7 +1829,11 @@ def get_lookup_queue_stats():
 
     now_utc = datetime.now(timezone.utc)
     oldest_queued_job_age_seconds = 0.0
-    for job in lookup_queue.jobs:
+    for job_id in lookup_queue.job_ids:
+        job = lookup_queue.fetch_job(job_id)
+        if not job:
+            continue
+
         age_seconds = _seconds_since(getattr(job, "enqueued_at", None), now_utc)
         if age_seconds is None:
             continue
@@ -1724,6 +1858,22 @@ def get_lookup_queue_stats():
         "lookup_breaker_reason": lookup_breaker_reason,
         "timestamp": utc_timestamp(),
     }
+
+
+def get_lookup_queue_stats():
+    """Collect queue and worker telemetry for the validation pipeline."""
+    now = time.time()
+    with _lookup_stats_cache_lock:
+        cached_value = _lookup_stats_cache.get("value")
+        if cached_value and now < float(_lookup_stats_cache.get("expires_at", 0.0)):
+            return dict(cached_value)
+
+    stats = _collect_lookup_queue_stats_uncached()
+    with _lookup_stats_cache_lock:
+        _lookup_stats_cache["value"] = stats
+        _lookup_stats_cache["expires_at"] = now + _LOOKUP_STATS_CACHE_TTL_SECONDS
+
+    return dict(stats)
 
 
 def is_lookup_queue_saturated():
