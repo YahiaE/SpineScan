@@ -22,6 +22,7 @@ _apscheduler_available = False
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.interval import IntervalTrigger
+
     _apscheduler_available = True
 except ImportError:
     BackgroundScheduler = None
