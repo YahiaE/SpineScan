@@ -72,6 +72,40 @@ try:
 except (TypeError, ValueError):
     _AUTH_SESSION_TTL_SECONDS = 86400
 
+try:
+    _AUTH_SESSION_REFRESH_INTERVAL_SECONDS = max(
+        60,
+        int(os.getenv("AUTH_SESSION_REFRESH_INTERVAL_SECONDS", "1800")),
+    )
+except (TypeError, ValueError):
+    _AUTH_SESSION_REFRESH_INTERVAL_SECONDS = 1800
+
+_DISCogs_RATE_LIMIT_ACQUIRE_SCRIPT = """
+local configured_limit = tonumber(redis.call('GET', KEYS[1]) or ARGV[1])
+local default_limit = tonumber(ARGV[1])
+local ttl_seconds = tonumber(ARGV[2])
+
+if not configured_limit or configured_limit < 1 then
+    configured_limit = default_limit
+end
+
+if redis.call('GET', KEYS[2]) then
+    return {0, 1, configured_limit, 0}
+end
+
+local current_count = redis.call('INCRBY', KEYS[3], 1)
+if current_count == 1 then
+    redis.call('EXPIRE', KEYS[3], ttl_seconds)
+end
+
+if current_count <= configured_limit then
+    return {1, 0, configured_limit, current_count}
+end
+
+redis.call('DECRBY', KEYS[3], 1)
+return {0, 0, configured_limit, current_count - 1}
+"""
+
 
 def _quantile(values, quantile):
     if not values:
@@ -158,6 +192,7 @@ def persist_discogs_auth_tokens(access_token, access_token_secret, discogs_usern
         },
     )
     redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
+    session["auth_session_ttl_refreshed_at"] = time.time()
 
     # Keep non-sensitive username in session for existing flow compatibility.
     session["discogs_username"] = discogs_username
@@ -177,7 +212,7 @@ def get_discogs_auth_tokens():
             access_token = token_data.get("access_token")
             access_token_secret = token_data.get("access_token_secret")
             if access_token and access_token_secret:
-                redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
+                _refresh_auth_session_ttl_if_needed(auth_key)
                 return access_token, access_token_secret
 
         return None, None
@@ -211,7 +246,7 @@ def get_discogs_auth_session_status():
         )
 
         if token_data:
-            redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
+            _refresh_auth_session_ttl_if_needed(auth_key)
 
         return {
             "source": "redis" if has_tokens else "none",
@@ -246,6 +281,25 @@ def get_discogs_auth_session_status():
 def get_discogs_access_token():
     access_token, _ = get_discogs_auth_tokens()
     return access_token
+
+
+def _refresh_auth_session_ttl_if_needed(auth_key):
+    last_refreshed_at = session.get("auth_session_ttl_refreshed_at")
+    now = time.time()
+
+    try:
+        last_refreshed_at = float(last_refreshed_at)
+    except (TypeError, ValueError):
+        last_refreshed_at = None
+
+    if (
+        last_refreshed_at is not None
+        and now - last_refreshed_at < _AUTH_SESSION_REFRESH_INTERVAL_SECONDS
+    ):
+        return
+
+    redis_conn.expire(auth_key, _AUTH_SESSION_TTL_SECONDS)
+    session["auth_session_ttl_refreshed_at"] = now
 
 
 def get_discogs_client():
@@ -353,8 +407,14 @@ def get_lookup_breaker_reason():
         return None
 
 
+def get_lookup_breaker_state():
+    reason = get_lookup_breaker_reason()
+    return bool(reason), reason
+
+
 def is_lookup_breaker_open():
-    return bool(get_lookup_breaker_reason())
+    breaker_open, _ = get_lookup_breaker_state()
+    return breaker_open
 
 
 def record_discogs_429():
@@ -384,28 +444,30 @@ def record_sync_lookup_failure():
         pass
 
 
-def _read_discogs_dynamic_limit(authenticated, scope="global"):
+def _try_acquire_discogs_rate_limit_slot(authenticated, rate_scope):
     default_limit = (
         DISCOGS_AUTH_REQUEST_LIMIT if authenticated else DISCOGS_UNAUTH_REQUEST_LIMIT
     )
-    try:
-        dynamic_limit = redis_conn.get(
-            discogs_rate_limit_total_key(authenticated, scope)
-        )
-    except Exception:
-        return default_limit
+    keys = [
+        discogs_rate_limit_total_key(authenticated, rate_scope),
+        discogs_rate_limit_block_key(authenticated, rate_scope),
+        get_discogs_rate_bucket_key(authenticated, rate_scope),
+    ]
+    args = [default_limit, DISCOGS_RATE_WINDOW_SECONDS * 2]
 
-    if dynamic_limit is None:
-        return default_limit
-
-    return max(1, min(default_limit, _safe_int(dynamic_limit, default_limit)))
-
-
-def _should_wait_for_discogs_block(authenticated, scope="global"):
-    try:
-        return bool(redis_conn.get(discogs_rate_limit_block_key(authenticated, scope)))
-    except Exception:
-        return False
+    result = redis_conn.eval(
+        _DISCogs_RATE_LIMIT_ACQUIRE_SCRIPT, len(keys), *keys, *args
+    )
+    granted = bool(int(result[0]))
+    blocked = bool(int(result[1]))
+    limit = _safe_int(result[2], default_limit)
+    current_count = _safe_int(result[3], 0)
+    return {
+        "granted": granted,
+        "blocked": blocked,
+        "limit": limit,
+        "current_count": current_count,
+    }
 
 
 def _extract_discogs_headers_from_http_error(error):
@@ -480,29 +542,19 @@ def _apply_discogs_rate_headers(authenticated, scope, headers):
 
 def acquire_discogs_rate_limit_slot(authenticated=True, rate_scope="global"):
     """Block until a shared Discogs rate-limit slot is available."""
-    limit = _read_discogs_dynamic_limit(authenticated, rate_scope)
-
     while True:
-        if _should_wait_for_discogs_block(authenticated, rate_scope):
-            time.sleep(0.25)
-            continue
-
-        bucket_key = get_discogs_rate_bucket_key(authenticated, rate_scope)
         try:
-            current_count = redis_conn.incr(bucket_key)
-            if current_count == 1:
-                redis_conn.expire(bucket_key, DISCOGS_RATE_WINDOW_SECONDS * 2)
+            slot_result = _try_acquire_discogs_rate_limit_slot(
+                authenticated,
+                rate_scope,
+            )
         except Exception:
             # Redis unavailable: fail open so Discogs calls can still proceed.
             return
 
-        if current_count <= limit:
+        if slot_result["granted"]:
             return
 
-        try:
-            redis_conn.decr(bucket_key)
-        except Exception:
-            return
         wait_seconds = max(
             0.25,
             DISCOGS_RATE_WINDOW_SECONDS
@@ -1332,6 +1384,19 @@ def album_lookup_pending_key(normalized_key):
     return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:{normalized_key}"
 
 
+def pending_lookup_index_key():
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:index"
+
+
+def _track_pending_lookup_key(pending_key):
+    expires_at = time.time() + ALBUM_LOOKUP_PENDING_TTL_SECONDS
+    redis_conn.zadd(pending_lookup_index_key(), {pending_key: expires_at})
+
+
+def _untrack_pending_lookup_key(pending_key):
+    redis_conn.zrem(pending_lookup_index_key(), pending_key)
+
+
 def utc_timestamp():
     return datetime.now(timezone.utc).isoformat()
 
@@ -1380,7 +1445,9 @@ def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
     try:
         # Keep pending-marker cleanup in Redis so queued lookups can be deduplicated,
         # but do not write hot lookup results to Redis.
-        redis_conn.delete(album_lookup_pending_key(normalized_key))
+        pending_key = album_lookup_pending_key(normalized_key)
+        redis_conn.delete(pending_key)
+        _untrack_pending_lookup_key(pending_key)
     except Exception:
         # Redis unavailable: still return the computed result to the caller.
         pass
@@ -1482,6 +1549,11 @@ def enqueue_album_lookup_job(
         return None
 
     try:
+        _track_pending_lookup_key(pending_key)
+    except Exception:
+        pass
+
+    try:
         if access_token and access_token_secret:
             job = lookup_queue.enqueue(
                 run_album_lookup_job_authenticated,
@@ -1508,6 +1580,7 @@ def enqueue_album_lookup_job(
             )
     except Exception:
         redis_conn.delete(pending_key)
+        _untrack_pending_lookup_key(pending_key)
         raise
 
     redis_conn.setex(pending_key, ALBUM_LOOKUP_PENDING_TTL_SECONDS, job.id)
@@ -1528,8 +1601,11 @@ def build_lookup_request_context():
     except RuntimeError:
         pass
 
+    breaker_open, breaker_reason = get_lookup_breaker_state()
+
     return {
-        "breaker_open": is_lookup_breaker_open(),
+        "breaker_open": breaker_open,
+        "breaker_reason": breaker_reason,
         "worker_available": worker_available,
         "queue_saturated": queue_saturated,
         "access_token": access_token,
@@ -1549,16 +1625,12 @@ def has_lookup_worker_available():
 def count_lookup_pending_markers():
     """Count Redis pending markers used to deduplicate lookup jobs."""
     try:
-        markers = redis_conn.scan_iter(
-            match=f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:*"
-        )
+        now = time.time()
+        index_key = pending_lookup_index_key()
+        redis_conn.zremrangebyscore(index_key, 0, now)
+        return redis_conn.zcard(index_key)
     except Exception:
         return 0
-
-    count = 0
-    for _ in markers:
-        count += 1
-    return count
 
 
 def _seconds_since(timestamp, now_utc):
@@ -1633,6 +1705,8 @@ def get_lookup_queue_stats():
             continue
         oldest_queued_job_age_seconds = max(oldest_queued_job_age_seconds, age_seconds)
 
+    lookup_breaker_open, lookup_breaker_reason = get_lookup_breaker_state()
+
     return {
         "queue_name": lookup_queue.name,
         "workers_online": len(workers),
@@ -1646,8 +1720,8 @@ def get_lookup_queue_stats():
         "max_job_age_seconds": max_job_age_seconds,
         "stale_jobs_dropped": stale_jobs_dropped,
         "sync_fallback_active": len(workers) == 0,
-        "lookup_breaker_open": is_lookup_breaker_open(),
-        "lookup_breaker_reason": get_lookup_breaker_reason(),
+        "lookup_breaker_open": lookup_breaker_open,
+        "lookup_breaker_reason": lookup_breaker_reason,
         "timestamp": utc_timestamp(),
     }
 
@@ -1751,10 +1825,14 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
         except RuntimeError as error:
             if str(error) != "sync_lookup_capacity_reached":
                 record_sync_lookup_failure()
-                context["breaker_open"] = is_lookup_breaker_open()
+                context["breaker_open"], context["breaker_reason"] = (
+                    get_lookup_breaker_state()
+                )
         except Exception:
             record_sync_lookup_failure()
-            context["breaker_open"] = is_lookup_breaker_open()
+            context["breaker_open"], context["breaker_reason"] = (
+                get_lookup_breaker_state()
+            )
 
     if context.get("breaker_open"):
         return build_degraded_lookup_result()
@@ -1803,7 +1881,9 @@ def run_album_lookup_job(artist, title, normalized_key=None):
         )
         return persist_lookup_result(lookup_key, artist, title, match)
     except Exception as error:
-        redis_conn.delete(album_lookup_pending_key(lookup_key))
+        pending_key = album_lookup_pending_key(lookup_key)
+        redis_conn.delete(pending_key)
+        _untrack_pending_lookup_key(pending_key)
         print(f"Discogs lookup job failed for {artist} - {title}: {error}")
         raise
 
@@ -1834,6 +1914,8 @@ def run_album_lookup_job_authenticated(
         )
         return persist_lookup_result(lookup_key, artist, title, match)
     except Exception as error:
-        redis_conn.delete(album_lookup_pending_key(lookup_key))
+        pending_key = album_lookup_pending_key(lookup_key)
+        redis_conn.delete(pending_key)
+        _untrack_pending_lookup_key(pending_key)
         print(f"Authenticated sync lookup failed for {artist} - {title}: {error}")
         raise
