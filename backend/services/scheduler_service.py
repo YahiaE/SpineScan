@@ -12,6 +12,8 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from services.startup_tracker import mark_warm
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ def _ping_health_endpoint():
         response = requests.get(health_url, timeout=5)
 
         if response.status_code == 200:
+            mark_warm()  # Mark app as warm after successful ping
             logger.debug(
                 f"[{datetime.now().isoformat()}] Health check ping successful: {health_url}"
             )

@@ -7,7 +7,6 @@ from config import (
     ALLOWED_MIME,
     MAX_UPLOAD_BYTES,
 )
-from ocr_functions.process_image import main as process_image_main
 from services.storage_service import (
     build_capture_checksum,
     build_capture_object_key,
@@ -38,6 +37,7 @@ from services.discogs_service import (
     get_discogs_identity,
     iter_discogs_paginated_items,
 )
+from services.lazy_loader import get_ocr_process_image_main
 
 data_bp = Blueprint("data", __name__)
 
@@ -277,7 +277,9 @@ def scan_image():
         return {"error": "File not found"}, 404
 
     try:
-        albums = with_temp_file_from_bytes(file_bytes, suffix, process_image_main)
+        albums = with_temp_file_from_bytes(
+            file_bytes, suffix, get_ocr_process_image_main()
+        )
         return {"albums": albums}
     except Exception as e:
         return {"error": str(e)}, 500
@@ -420,7 +422,9 @@ def process_latest_image():
         return {"error": "Image file not found or has expired"}, 404
 
     try:
-        result = with_temp_file_from_bytes(file_bytes, suffix, process_image_main)
+        result = with_temp_file_from_bytes(
+            file_bytes, suffix, get_ocr_process_image_main()
+        )
 
         if latest_capture.get("id") is not None:
             mark_capture_manifest_status(latest_capture.get("id"), "processed")

@@ -20,6 +20,7 @@ from routes.discogs_routes import discogs_bp
 from routes.ops_routes import ops_bp
 from services.monitoring_service import record_http_request
 from services.scheduler_service import init_scheduler, stop_scheduler
+from services.startup_tracker import initialize_startup_tracker, is_cold_start
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,9 @@ logger = logging.getLogger(__name__)
 def create_app():
     app = Flask(__name__)
     app.secret_key = FLASK_SECRET_KEY
+
+    # Initialize startup tracker early to monitor cold starts
+    initialize_startup_tracker()
 
     CORS(
         app,
@@ -77,6 +81,16 @@ def create_app():
                 status_code=response.status_code,
                 duration_seconds=duration,
             )
+
+            # Add cold-start indicators for client UX awareness
+            if is_cold_start(duration):
+                response.headers["X-Cold-Start"] = "true"
+                response.headers["X-Request-Duration"] = f"{duration:.2f}s"
+                if duration > 3:
+                    response.headers["X-Slow-Request"] = "true"
+                    response.headers["X-Warning"] = (
+                        "Server is waking up. First request may take up to 30 seconds."
+                    )
 
         return response
 

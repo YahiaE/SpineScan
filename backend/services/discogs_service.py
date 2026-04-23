@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from threading import BoundedSemaphore, Lock
 
-import discogs_client
+from services.lazy_loader import get_discogs_client_class, get_discogs_Client
 from discogs_client.exceptions import HTTPError
 from flask import session
 from redis.exceptions import NoScriptError
@@ -436,7 +436,9 @@ def create_discogs_oauth_client():
     """Create a Discogs client backed by OAuth fetcher methods."""
     consumer_key, consumer_secret = get_discogs_consumer_credentials()
 
-    return discogs_client.Client(
+    discogs_client_module = get_discogs_client_class()  # Lazy load discogs_client
+
+    return discogs_client_module.Client(
         "my_user_agent/1.0",
         consumer_key=consumer_key,
         consumer_secret=consumer_secret,
@@ -621,7 +623,7 @@ def _extract_discogs_headers_from_client(api_call):
 
     for cell in closure:
         value = getattr(cell, "cell_contents", None)
-        if isinstance(value, discogs_client.Client):
+        if isinstance(value, get_discogs_Client()):
             client = value
             break
 

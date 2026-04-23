@@ -1,4 +1,4 @@
-from google import genai
+from services.lazy_loader import get_gemini_client
 from google.genai import types
 import os
 from dotenv import load_dotenv
@@ -10,8 +10,7 @@ def main(url):
 
     with open(url, "rb") as f:
         image_bytes = f.read()
-    client = genai.Client()
-    client.api_key = os.getenv("GEMINI_API_KEY")
+    client = get_gemini_client()  # Lazily loaded on first call
     prompt = """
 Task
 Extract text from CD spine images and output standardized "Artist - Album" entries.
