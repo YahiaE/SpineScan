@@ -7,6 +7,15 @@ import {
 } from "react";
 
 const SCAN_HISTORY_STORAGE_KEY = "spinescan:scanHistory";
+const SCAN_HISTORY_RETENTION_MS = 6 * 60 * 60 * 1000;
+
+function pruneScanHistory(entries: ScanHistoryEntry[]): ScanHistoryEntry[] {
+  const cutoff = Date.now() - SCAN_HISTORY_RETENTION_MS;
+  return entries.filter((entry) => {
+    const parsed = Date.parse(entry.date);
+    return Number.isFinite(parsed) && parsed >= cutoff;
+  });
+}
 
 export interface AlbumValidation {
   status: "pending" | "valid" | "invalid";
@@ -80,7 +89,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>(() => {
     try {
       const stored = localStorage.getItem(SCAN_HISTORY_STORAGE_KEY);
-      return stored ? (JSON.parse(stored) as ScanHistoryEntry[]) : [];
+      const parsed = stored ? (JSON.parse(stored) as ScanHistoryEntry[]) : [];
+      return pruneScanHistory(parsed);
     } catch {
       return [];
     }
@@ -108,10 +118,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [scanHistory]);
 
   const addHistory = (entry: Omit<ScanHistoryEntry, "date">) => {
-    setScanHistory((prev) => [
-      { date: new Date().toISOString(), ...entry },
-      ...prev,
-    ]);
+    setScanHistory((prev) => {
+      const pruned = pruneScanHistory(prev);
+      return [{ date: new Date().toISOString(), ...entry }, ...pruned];
+    });
   };
 
   return (
