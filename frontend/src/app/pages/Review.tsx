@@ -226,6 +226,10 @@ export function Review() {
     const maxDelay = 10000; // Cap at 10 seconds
     const jitterFraction = 0.1; // 10% jitter
 
+    if (attempt >= 20) {
+      return 15000; // Keep polling slowly after timeout warning
+    }
+
     const exponentialDelay = Math.min(
       baseDelay * Math.pow(multiplier, attempt),
       maxDelay,
@@ -237,9 +241,7 @@ export function Review() {
 
   useEffect(() => {
     const queuedAlbums = scannedAlbums.filter(
-      (album) =>
-        album.validation?.status === "pending" &&
-        Boolean(album.validation.message),
+      (album) => album.validation?.status === "pending",
     );
 
     if (queuedAlbums.length === 0) {
@@ -248,13 +250,12 @@ export function Review() {
       return;
     }
 
-    if (validating || pollTimedOut) {
+    if (validating) {
       return;
     }
 
-    if (pollAttemptsRef.current >= 20) {
+    if (pollAttemptsRef.current >= 20 && !pollTimedOut) {
       setPollTimedOut(true);
-      return;
     }
 
     const pollDelay = calculatePollDelay(pollAttemptsRef.current);
@@ -296,9 +297,7 @@ export function Review() {
   const progressPercent =
     totalCount > 0 ? Math.round((validCount / totalCount) * 100) : 0;
   const queuedPendingCount = scannedAlbums.filter(
-    (album) =>
-      album.validation?.status === "pending" &&
-      Boolean(album.validation?.message),
+    (album) => album.validation?.status === "pending",
   ).length;
   const verificationActive = validating || queuedPendingCount > 0;
 
