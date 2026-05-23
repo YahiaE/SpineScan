@@ -33,14 +33,25 @@ except ImportError:
     )
 
 
+def _resolve_health_base_url():
+    """Resolve health-check base URL for local and hosted environments."""
+    explicit_url = str(os.getenv("APP_URL", "")).strip()
+    if explicit_url:
+        return explicit_url.rstrip("/")
+
+    host = str(os.getenv("HEALTH_CHECK_HOST", "127.0.0.1")).strip() or "127.0.0.1"
+    port = str(os.getenv("PORT", "5000")).strip() or "5000"
+    return f"http://{host}:{port}"
+
+
 def _ping_health_endpoint():
     """
     Ping the application's health endpoint to prevent instance spindown on Render free tier.
     Render spins down free instances after 15 minutes of inactivity.
     """
     try:
-        # Determine the target URL from environment or fallback to localhost
-        app_url = os.getenv("APP_URL", "http://localhost:5000")
+        # Prefer APP_URL if configured; otherwise use local process host/port.
+        app_url = _resolve_health_base_url()
         health_url = f"{app_url}/healthz"
 
         response = requests.get(health_url, timeout=5)
