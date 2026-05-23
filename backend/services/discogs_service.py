@@ -1952,7 +1952,11 @@ def try_run_sync_lookup_with_capacity(artist, title, normalized_key):
 
 
 def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context=None):
-    """Resolve an album validation from Supabase, then sync lookup/queue fallback."""
+    """Resolve an album validation from Supabase, then sync lookup/queue fallback.
+
+    When enqueue_if_missing is False, this function still attempts sync lookup,
+    but will not enqueue a worker job on cache misses.
+    """
     normalized_key = album_lookup_normalized_key(artist, title)
 
     cached_result = read_cached_lookup_result(normalized_key)
@@ -1965,9 +1969,6 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
             normalized_key,
             build_lookup_result_from_row(persisted_row, artist, title),
         )
-
-    if not enqueue_if_missing:
-        return build_pending_lookup_result("Validation has not completed yet")
 
     context = lookup_context or build_lookup_request_context()
 
@@ -1998,6 +1999,9 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
 
     if context.get("breaker_open"):
         return build_degraded_lookup_result()
+
+    if not enqueue_if_missing:
+        return build_pending_lookup_result("Validation has not completed yet")
 
     if worker_available and not queue_saturated:
         try:
