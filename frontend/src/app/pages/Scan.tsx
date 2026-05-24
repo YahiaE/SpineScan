@@ -46,6 +46,26 @@ export function Scan() {
     }
   };
 
+  const disableTorch = async () => {
+    const track = streamRef.current?.getVideoTracks?.()[0] as
+      | TorchCapableTrack
+      | undefined;
+
+    if (!torchEnabled || !track?.applyConstraints || !supportsTorch(track)) {
+      return;
+    }
+
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: false } as MediaTrackConstraintSet],
+      });
+    } catch {
+      // Best-effort only; stopping the track still tears down the camera.
+    } finally {
+      setTorchEnabled(false);
+    }
+  };
+
   const startCamera = async () => {
     setCameraError(null);
     setCaptureError(null);
@@ -70,7 +90,8 @@ export function Scan() {
     }
   };
 
-  const stopCamera = () => {
+  const stopCamera = async () => {
+    await disableTorch();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setTorchSupported(false);
@@ -79,7 +100,9 @@ export function Scan() {
 
   useEffect(() => {
     startCamera();
-    return stopCamera;
+    return () => {
+      void stopCamera();
+    };
   }, []);
 
   const handleTorchToggle = async () => {
@@ -107,12 +130,14 @@ export function Scan() {
     }
   };
 
-  const handleCapture = () => {
+  const handleCapture = async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
     setCaptureError(null);
+
+    await disableTorch();
 
     const width = video.videoWidth || video.clientWidth;
     const height = video.videoHeight || video.clientHeight;
@@ -132,7 +157,7 @@ export function Scan() {
       (blob) => {
         if (blob) {
           const url = URL.createObjectURL(blob);
-          stopCamera();
+          void stopCamera();
           setPreview(url);
           setPreviewBlob(blob);
           return;
@@ -144,7 +169,7 @@ export function Scan() {
           .then((res) => res.blob())
           .then((fallbackBlob) => {
             const url = URL.createObjectURL(fallbackBlob);
-            stopCamera();
+            void stopCamera();
             setPreview(url);
             setPreviewBlob(fallbackBlob);
           })
