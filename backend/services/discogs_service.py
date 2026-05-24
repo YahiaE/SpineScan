@@ -1399,6 +1399,42 @@ def mirror_collection_cache_entry_to_albums(release_id, album_key):
     )
 
 
+def load_collection_cache_membership(discogs_username, folder_id):
+    """Load one folder's cached membership into in-memory sets for import checks."""
+    normalized_folder_id = int(folder_id)
+
+    try:
+        response = (
+            supabase.table("discogs_collection_cache")
+            .select("release_id, album_key")
+            .eq("discogs_username", discogs_username)
+            .eq("folder_id", normalized_folder_id)
+            .limit(5000)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+    except Exception as error:
+        print(f"Failed to load collection cache membership: {error}")
+        return set(), set()
+
+    release_ids = set()
+    album_keys = set()
+    for row in rows:
+        release_id = row.get("release_id")
+        album_key = str(row.get("album_key") or "").strip()
+
+        if release_id is not None:
+            try:
+                release_ids.add(int(release_id))
+            except (TypeError, ValueError):
+                pass
+
+        if album_key:
+            album_keys.add(album_key)
+
+    return release_ids, album_keys
+
+
 def is_release_in_collection_cache(discogs_username, folder_id, release_id):
     """Return True when release is already in the collection (queried from Supabase)."""
     normalized_release_id = int(release_id)

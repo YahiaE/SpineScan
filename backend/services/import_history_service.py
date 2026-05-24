@@ -14,7 +14,7 @@ def list_import_history(discogs_username, limit=50):
             "id, discogs_username, folder_id, folder_name, status, added_count, "
             "skipped_count, failed_count, results_json, created_at"
         )
-        .ilike("discogs_username", normalized_username)
+        .eq("discogs_username", normalized_username)
         .order("created_at", desc=True)
         .limit(max(1, int(limit)))
         .execute()

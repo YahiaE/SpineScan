@@ -24,10 +24,9 @@ from services.discogs_service import (
     get_discogs_collection_folders,
     get_discogs_identity,
     get_lookup_queue_stats,
+    load_collection_cache_membership,
     build_lookup_request_context,
-    is_album_in_collection_cache,
     is_discogs_duplicate_error,
-    is_release_in_collection_cache,
     mirror_collection_cache_entry_to_albums,
     resolve_release_match,
 )
@@ -281,6 +280,10 @@ def import_entries():
         pending_release_ids = set()
         pending_album_keys = set()
         results = []
+        cached_release_ids, cached_album_keys = load_collection_cache_membership(
+            user.username,
+            folder_id,
+        )
 
         for entry in entries:
             entry_id = entry.get("id")
@@ -362,11 +365,7 @@ def import_entries():
                 )
                 continue
 
-            if is_release_in_collection_cache(
-                user.username,
-                folder_id,
-                normalized_release_id,
-            ):
+            if normalized_release_id in cached_release_ids:
                 mirror_collection_cache_entry_to_albums(
                     normalized_release_id,
                     entry_album_key,
@@ -396,11 +395,8 @@ def import_entries():
                 )
                 continue
 
-            if is_album_in_collection_cache(
-                user.username,
-                folder_id,
-                entry_album_key,
-            ):
+            serialized_entry_album_key = "::".join(entry_album_key)
+            if serialized_entry_album_key in cached_album_keys:
                 mirror_collection_cache_entry_to_albums(
                     normalized_release_id,
                     entry_album_key,
@@ -423,6 +419,8 @@ def import_entries():
                 )
                 pending_release_ids.add(normalized_release_id)
                 pending_album_keys.add(entry_album_key)
+                cached_release_ids.add(normalized_release_id)
+                cached_album_keys.add(serialized_entry_album_key)
                 cache_collection_membership_entry(
                     user.username,
                     folder_id,
@@ -440,6 +438,8 @@ def import_entries():
                 )
             except HTTPError as e:
                 if is_discogs_duplicate_error(e):
+                    cached_release_ids.add(normalized_release_id)
+                    cached_album_keys.add(serialized_entry_album_key)
                     cache_collection_membership_entry(
                         user.username,
                         folder_id,
