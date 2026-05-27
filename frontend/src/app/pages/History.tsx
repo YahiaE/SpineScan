@@ -32,6 +32,32 @@ function getStatusClasses(status?: string) {
   }
 }
 
+function normalizeEntryStatus(status?: string, message?: string) {
+  if (status === "added") return "added";
+  if (status === "skipped") return "skipped";
+  if (status === "failed") return "failed";
+  if (status === "rejected") return "rejected";
+
+  const lowerMessage = (message ?? "").toLowerCase();
+  if (
+    lowerMessage.includes("already") ||
+    lowerMessage.includes("duplicate") ||
+    lowerMessage.includes("exists") ||
+    lowerMessage.includes("skip")
+  ) {
+    return "skipped";
+  }
+  if (
+    lowerMessage.includes("failed") ||
+    lowerMessage.includes("error") ||
+    lowerMessage.includes("reject")
+  ) {
+    return "failed";
+  }
+
+  return undefined;
+}
+
 export function HistoryPage() {
   const navigate = useNavigate();
   const { scanHistory } = useAppContext();
@@ -81,13 +107,18 @@ export function HistoryPage() {
               {(() => {
                 const statusBreakdown = (scan.scannedEntries ?? []).reduce(
                   (acc, entry) => {
-                    if (entry.status === "added") {
+                    const normalizedStatus = normalizeEntryStatus(
+                      entry.status,
+                      entry.message,
+                    );
+
+                    if (normalizedStatus === "added") {
                       acc.imported += 1;
-                    } else if (entry.status === "skipped") {
+                    } else if (normalizedStatus === "skipped") {
                       acc.skipped += 1;
                     } else if (
-                      entry.status === "failed" ||
-                      entry.status === "rejected"
+                      normalizedStatus === "failed" ||
+                      normalizedStatus === "rejected"
                     ) {
                       acc.failed += 1;
                     } else {
@@ -145,26 +176,35 @@ export function HistoryPage() {
                             </span>
                           )}
                         </div>
-                        {scan.scannedEntries.slice(0, 5).map((entry) => (
-                          <div
-                            key={entry.id}
-                            className="flex items-center justify-between gap-2 rounded-md bg-neutral-900/60 px-2 py-1"
-                          >
-                            <p className="text-sm text-neutral-300 truncate">
-                              {entry.artist} — {entry.title}
-                            </p>
-                            <span
-                              className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${getStatusClasses(entry.status)}`}
+                        {scan.scannedEntries.map((entry) => {
+                          const normalizedStatus = normalizeEntryStatus(
+                            entry.status,
+                            entry.message,
+                          );
+
+                          return (
+                            <div
+                              key={entry.id}
+                              className="flex items-start justify-between gap-2 rounded-md bg-neutral-900/60 px-2 py-1"
                             >
-                              {getStatusLabel(entry.status)}
-                            </span>
-                          </div>
-                        ))}
-                        {scan.scannedEntries.length > 5 && (
-                          <p className="text-xs text-neutral-500">
-                            ...and {scan.scannedEntries.length - 5} more
-                          </p>
-                        )}
+                              <div className="min-w-0">
+                                <p className="text-sm text-neutral-300 truncate">
+                                  {entry.artist} — {entry.title}
+                                </p>
+                                {entry.message && (
+                                  <p className="text-xs text-neutral-500 mt-0.5 line-clamp-2">
+                                    {entry.message}
+                                  </p>
+                                )}
+                              </div>
+                              <span
+                                className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${getStatusClasses(normalizedStatus)}`}
+                              >
+                                {getStatusLabel(normalizedStatus)}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                     {!scan.scannedEntries?.length && (
