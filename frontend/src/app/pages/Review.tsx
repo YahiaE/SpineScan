@@ -135,6 +135,7 @@ export function Review() {
         const payload = (await res.json()) as FolderResponse;
         if (cancelled) return;
 
+        // On page load, trust backend folder counts so the starting view is authoritative.
         setCollectionFolders(payload.folders);
         if (payload.folders.length > 0 && selectedCollectionId === null) {
           setSelectedCollectionId(payload.folders[0].id);
