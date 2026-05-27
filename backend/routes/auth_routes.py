@@ -1,4 +1,6 @@
 import time
+import logging
+from urllib.parse import urlparse
 
 from discogs_client.exceptions import HTTPError
 from flask import Blueprint, jsonify, request, session
@@ -13,6 +15,22 @@ from services.discogs_service import (
 )
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
+logger = logging.getLogger(__name__)
+
+
+def _build_callback_url():
+    base = (BASE_URL or "").strip().rstrip("/")
+    if not base:
+        base = "http://localhost:5000"
+
+    parsed = urlparse(base)
+    if not parsed.scheme:
+        if base.startswith("localhost") or base.startswith("127.0.0.1"):
+            base = f"http://{base}"
+        else:
+            base = f"https://{base}"
+
+    return f"{base}/auth/callback"
 
 
 def _get_oauth_pending_state():
@@ -27,8 +45,10 @@ def get_request_token():
     """Create an OAuth request token and return Discogs authorize URL."""
     try:
         d = create_discogs_oauth_client()
+        callback_url = _build_callback_url()
+        logger.info("OAuth request_token started with callback_url=%s", callback_url)
         request_token, request_token_secret, url = call_discogs(
-            lambda: d.get_authorize_url(f"{BASE_URL}/auth/callback"),
+            lambda: d.get_authorize_url(callback_url),
             authenticated=False,
         )
 
@@ -69,6 +89,11 @@ def get_request_token():
 def callback():
     oauth_token = request.args.get("oauth_token")
     oauth_verifier = request.args.get("oauth_verifier")
+    logger.info(
+        "OAuth callback received token_present=%s verifier_present=%s",
+        bool(oauth_token),
+        bool(oauth_verifier),
+    )
     if oauth_token and oauth_verifier:
         updated_in_redis = False
         try:
@@ -115,6 +140,9 @@ def callback():
 @auth_bp.route("/access_token", methods=["GET"])
 def exchange_access_token():
     oauth_token = request.args.get("oauth_token") or session.get("request_token")
+    logger.info(
+        "OAuth access_token exchange requested token_present=%s", bool(oauth_token)
+    )
     token_data = {}
     if oauth_token:
         try:

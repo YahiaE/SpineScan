@@ -40,7 +40,7 @@ def _resolve_health_base_url():
         return explicit_url.rstrip("/")
 
     host = str(os.getenv("HEALTH_CHECK_HOST", "127.0.0.1")).strip() or "127.0.0.1"
-    port = str(os.getenv("PORT", "5000")).strip() or "5000"
+    port = str(os.getenv("PORT", "8080")).strip() or "8080"
     return f"http://{host}:{port}"
 
 
