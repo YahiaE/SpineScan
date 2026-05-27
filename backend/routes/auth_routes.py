@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from discogs_client.exceptions import HTTPError
 from flask import Blueprint, jsonify, request, session
 
-from config import BASE_URL
+from config import BASE_URL, DISCOGS_CALLBACK_URL
 from extensions import redis_conn
 from services.discogs_service import (
     call_discogs,
@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def _build_callback_url():
+    if DISCOGS_CALLBACK_URL:
+        return DISCOGS_CALLBACK_URL.rstrip("/")
+
     base = (BASE_URL or "").strip().rstrip("/")
     if not base:
         base = "http://localhost:5000"
