@@ -1,7 +1,7 @@
 import logging
 import time
 
-from flask import Flask, g, request, session
+from flask import Flask, g, redirect, request, session
 from flask_cors import CORS
 from werkzeug.exceptions import RequestEntityTooLarge
 
@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 def create_app():
     app = Flask(__name__)
     app.secret_key = FLASK_SECRET_KEY
+
+    @app.get("/api/auth/callback")
+    def auth_callback_compat():
+        query = request.query_string.decode("utf-8")
+        target = "/auth/callback"
+        if query:
+            target = f"{target}?{query}"
+        return redirect(target, code=302)
 
     # Initialize startup tracker early to monitor cold starts
     initialize_startup_tracker()
