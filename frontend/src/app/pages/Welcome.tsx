@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Disc3, CheckCircle2, ExternalLink } from "lucide-react";
 import { useAppContext } from "../store";
@@ -19,6 +20,7 @@ export function Welcome() {
   const [error, setError] = useState<string | null>(null);
   const [authPopup, setAuthPopup] = useState<Window | null>(null);
   const [oauthToken, setOauthToken] = useState<string | null>(null);
+  const [oauthVerifier, setOauthVerifier] = useState<string | null>(null);
 
   const handleConnect = async () => {
     setStep("requesting");
@@ -46,10 +48,38 @@ export function Welcome() {
     }
   };
 
-  const handleAuthorized = async () => {
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type !== "discogs_oauth_complete") return;
+
+      const token =
+        typeof event.data?.oauth_token === "string"
+          ? event.data.oauth_token
+          : null;
+      const verifier =
+        typeof event.data?.oauth_verifier === "string"
+          ? event.data.oauth_verifier
+          : null;
+
+      if (token) setOauthToken(token);
+      if (verifier) setOauthVerifier(verifier);
+      void handleAuthorized(token ?? undefined, verifier ?? undefined);
+    };
+
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  const handleAuthorized = async (
+    tokenOverride?: string,
+    verifierOverride?: string,
+  ) => {
     authPopup?.close();
 
-    if (!oauthToken) {
+    const token = tokenOverride ?? oauthToken;
+    const verifier = verifierOverride ?? oauthVerifier;
+
+    if (!token) {
       setError("Missing OAuth token. Please reconnect and try again.");
       setStep("error");
       return;
@@ -63,8 +93,11 @@ export function Welcome() {
       let payload: { error?: string } | null = null;
 
       for (let attempt = 0; attempt < EXCHANGE_RETRY_COUNT; attempt += 1) {
+        const query = new URLSearchParams({ oauth_token: token });
+        if (verifier) query.set("oauth_verifier", verifier);
+
         res = await apiFetch(
-          `${API_BASE}/auth/access_token?oauth_token=${encodeURIComponent(oauthToken)}`,
+          `${API_BASE}/auth/access_token?${query.toString()}`,
           {},
         );
 

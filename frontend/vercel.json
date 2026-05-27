@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/favicon.ico",
+      "destination": "/icons/icon-192.png"
+    },
+    {
       "source": "/api/:path*",
       "destination": "https://ye-spinescan-api.fly.dev/:path*"
     }

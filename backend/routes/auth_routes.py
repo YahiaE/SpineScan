@@ -125,7 +125,14 @@ def callback():
     <body>
         <script>
             if (window.opener && !window.opener.closed) {
-                window.opener.postMessage({ type: "discogs_oauth_complete" }, "*");
+                window.opener.postMessage(
+                    {
+                        type: "discogs_oauth_complete",
+                        oauth_token: new URLSearchParams(window.location.search).get("oauth_token"),
+                        oauth_verifier: new URLSearchParams(window.location.search).get("oauth_verifier"),
+                    },
+                    "*"
+                );
             }
             window.close();
         </script>
@@ -143,6 +150,7 @@ def callback():
 @auth_bp.route("/access_token", methods=["GET"])
 def exchange_access_token():
     oauth_token = request.args.get("oauth_token") or session.get("request_token")
+    oauth_verifier = request.args.get("oauth_verifier")
     logger.info(
         "OAuth access_token exchange requested token_present=%s", bool(oauth_token)
     )
@@ -170,7 +178,7 @@ def exchange_access_token():
         return {"error": "Missing or invalid oauth_token"}, 400
 
     oauth_token_secret = token_data.get("request_token_secret")
-    oauth_verifier = token_data.get("oauth_verifier")
+    oauth_verifier = oauth_verifier or token_data.get("oauth_verifier")
 
     if not oauth_verifier:
         return {"error": "Authorization not completed yet"}, 409

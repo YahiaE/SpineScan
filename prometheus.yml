@@ -7,3 +7,50 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["localhost:5000"]
+
+# ---------------------------------------------------------------------------
+# Useful PromQL queries
+# ---------------------------------------------------------------------------
+#
+# --- Request traffic ---
+# Total requests over time (rate per minute):
+#   rate(spinescan_http_requests_total[1m]) * 60
+#
+# 5xx error rate (fraction of requests):
+#   rate(spinescan_http_errors_5xx_total[5m]) / rate(spinescan_http_requests_total[5m])
+#
+# p95 request latency (seconds):
+#   spinescan_http_request_duration_seconds_p95
+#
+# --- Discogs API ---
+# Rate of Discogs API calls per minute:
+#   rate(spinescan_discogs_api_calls_total[1m]) * 60
+#
+# Rate-limit (429) hits per minute:
+#   rate(spinescan_discogs_api_429_total[1m]) * 60
+#
+# Discogs API p95 latency:
+#   spinescan_discogs_api_latency_p95_seconds
+#
+# --- Lookup queue / circuit breaker ---
+# Current queue depth:
+#   spinescan_lookup_queue_depth
+#
+# Online workers (alert if 0):
+#   spinescan_lookup_workers_online
+#
+# Circuit breaker open (1 = open, 0 = closed):
+#   spinescan_lookup_breaker_open
+#
+# Started (in-flight) jobs:
+#   spinescan_lookup_started_jobs
+#
+# --- Recommended alert conditions ---
+# backend down:          absent(up{job="spinescan-backend"}) for 2m
+# readiness degraded:    probe_success{job="spinescan-backend"} == 0 for 2m
+# 5xx spike:             rate(spinescan_http_errors_5xx_total[5m]) > 0.05
+# high p95 latency:      spinescan_http_request_duration_seconds_p95 > 2
+# no workers:            spinescan_lookup_workers_online == 0 for 5m
+# queue backed up:       spinescan_lookup_queue_depth > 200 for 10m
+# breaker stuck open:    spinescan_lookup_breaker_open == 1 for 10m
+# 429 spike:             rate(spinescan_discogs_api_429_total[5m]) > 0.1
