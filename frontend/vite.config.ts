@@ -58,7 +58,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'https://spinescan-1.onrender.com',
+        target: 'https://ye-spinescan-api.fly.dev',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
