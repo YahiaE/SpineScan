@@ -392,7 +392,7 @@ export function Review() {
             >
               {collectionFolders.map((folder) => (
                 <option key={folder.id} value={folder.id}>
-                  {folder.name} ({folder.count})
+                  {folder.name}
                 </option>
               ))}
             </select>
