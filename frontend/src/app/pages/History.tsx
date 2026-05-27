@@ -1,12 +1,85 @@
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { formatDistanceToNow } from "date-fns";
 import { History, ScanLine, AlertCircle } from "lucide-react";
 import { useAppContext } from "../store";
+import { apiFetch } from "../apiClient";
+
+const API_BASE = "/api";
+
+type ImportHistoryEntry = {
+  id: number;
+  folder_id: number;
+  folder_name?: string | null;
+  added_count: number;
+  failed_count: number;
+  created_at: string;
+};
+
+type ImportHistoryResponse = {
+  imports: ImportHistoryEntry[];
+};
 
 export function HistoryPage() {
   const navigate = useNavigate();
   const { scanHistory } = useAppContext();
-  const shouldShowEmpty = scanHistory.length === 0;
+  const [imports, setImports] = useState<ImportHistoryEntry[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadHistory = async () => {
+      setLoadingHistory(true);
+
+      try {
+        const res = await apiFetch(`${API_BASE}/discogs/import-history`, {
+          method: "GET",
+        });
+
+        if (!res.ok) {
+          throw new Error("Failed to load import history");
+        }
+
+        const payload = (await res.json()) as ImportHistoryResponse;
+        if (!cancelled) {
+          setImports(payload.imports ?? []);
+        }
+      } catch {
+        if (!cancelled) {
+          setImports([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingHistory(false);
+        }
+      }
+    };
+
+    void loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const hasDurableHistory = imports.length > 0;
+  const entries = hasDurableHistory
+    ? imports.map((item) => ({
+        key: String(item.id),
+        count: item.added_count,
+        failedCount: item.failed_count,
+        folderName: item.folder_name ?? undefined,
+        date: item.created_at,
+      }))
+    : scanHistory.map((scan, index) => ({
+        key: `${scan.date}-${index}`,
+        count: scan.count,
+        failedCount: scan.failedCount,
+        folderName: scan.folderName,
+        date: scan.date,
+      }));
+  const shouldShowEmpty = !loadingHistory && entries.length === 0;
 
   return (
     <div className="flex flex-col h-full bg-neutral-950 p-6 overflow-y-auto">
@@ -15,9 +88,7 @@ export function HistoryPage() {
           <History className="w-5 h-5" />
           <h1 className="text-2xl font-bold text-white">Scan History</h1>
         </div>
-        <p className="text-neutral-400">
-          Review your recent local scan activity.
-        </p>
+        <p className="text-neutral-400">Review your recent scan activity.</p>
       </div>
 
       {shouldShowEmpty ? (
@@ -26,7 +97,7 @@ export function HistoryPage() {
           <div>
             <p className="text-white font-medium">No scan history yet</p>
             <p className="text-neutral-500 text-sm mt-1">
-              Your recent local scans will appear here.
+              Your recent scans will appear here.
             </p>
           </div>
           <button
@@ -36,11 +107,15 @@ export function HistoryPage() {
             Start a Scan
           </button>
         </div>
+      ) : loadingHistory && entries.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-center border border-neutral-800 border-dashed rounded-2xl p-8 gap-4">
+          <p className="text-neutral-500">Loading scan history...</p>
+        </div>
       ) : (
         <div className="space-y-3 pb-6">
-          {scanHistory.map((scan, index) => (
+          {entries.map((scan) => (
             <div
-              key={`${scan.date}-${index}`}
+              key={scan.key}
               className="bg-neutral-900 border border-neutral-800 rounded-xl p-4"
             >
               <div className="flex items-start justify-between gap-4">
