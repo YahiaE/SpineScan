@@ -32,6 +32,7 @@ export function Importing() {
     capturedImage,
     selectedCollectionId,
     collectionFolders,
+    setCollectionFolders,
     setCapturedImage,
     setLastImportSummary,
   } = useAppContext();
@@ -118,6 +119,27 @@ export function Importing() {
         const payload = (await res.json()) as ImportResponse;
         if (cancelled) return;
 
+        // Refresh the Discogs folder list so folder counts stay accurate after import.
+        try {
+          const foldersRes = await apiFetch(
+            `${API_BASE}/discogs/collection-folders`,
+            {
+              method: "GET",
+            },
+          );
+
+          if (foldersRes.ok) {
+            const foldersPayload = (await foldersRes.json()) as {
+              folders?: Array<{ id: number; name: string; count: number }>;
+            };
+            if (!cancelled && Array.isArray(foldersPayload.folders)) {
+              setCollectionFolders(foldersPayload.folders);
+            }
+          }
+        } catch {
+          // Best-effort refresh only; the import itself has already completed.
+        }
+
         const resultMap = Object.fromEntries(
           payload.results.map((result) => [result.id, result]),
         );
@@ -179,6 +201,7 @@ export function Importing() {
     scannedAlbums,
     selectedCollectionId,
     setCapturedImage,
+    setCollectionFolders,
     setLastImportSummary,
   ]);
 
