@@ -5,6 +5,7 @@ from rq import Retry
 
 from config import (
     ALLOWED_MIME,
+    DELETE_CAPTURE_AFTER_PROCESS,
     MAX_UPLOAD_BYTES,
 )
 from services.storage_service import (
@@ -429,11 +430,29 @@ def process_latest_image():
         if latest_capture.get("id") is not None:
             mark_capture_manifest_status(latest_capture.get("id"), "processed")
 
+        cleanup_job_id = None
+        if DELETE_CAPTURE_AFTER_PROCESS:
+            try:
+                cleanup_job = lookup_queue.enqueue(
+                    "routes.data_routes.finalize_capture_cleanup_job",
+                    latest_capture,
+                    retry=Retry(max=3, interval=[30, 120, 300]),
+                    job_timeout=60,
+                    result_ttl=0,
+                    failure_ttl=60 * 60 * 24,
+                )
+                cleanup_job_id = cleanup_job.id
+            except Exception:
+                # If queueing fails, perform best-effort synchronous cleanup.
+                finalize_capture_cleanup_job(latest_capture)
+
         return {
             "success": True,
             "image_path": latest_image_key,
             "storage": "supabase",
             "result": result,
+            "capture_cleanup_queued": bool(cleanup_job_id),
+            "cleanup_job_id": cleanup_job_id,
         }
     except Exception as e:
         return {"error": str(e)}, 500
