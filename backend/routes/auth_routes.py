@@ -150,21 +150,23 @@ def callback():
 @auth_bp.route("/access_token", methods=["GET"])
 def exchange_access_token():
     oauth_token = request.args.get("oauth_token") or session.get("request_token")
-    oauth_verifier = request.args.get("oauth_verifier")
+    oauth_verifier_param = request.args.get("oauth_verifier")
     logger.info(
-        "OAuth access_token exchange requested token_present=%s", bool(oauth_token)
+        "OAuth access_token exchange requested token_present=%s verifier_present=%s",
+        bool(oauth_token),
+        bool(oauth_verifier_param),
     )
     token_data = {}
     if oauth_token:
         try:
-            request_token_secret, oauth_verifier = redis_conn.hmget(
+            request_token_secret, oauth_verifier_stored = redis_conn.hmget(
                 oauth_token,
                 ["request_token_secret", "oauth_verifier"],
             )
-            if request_token_secret or oauth_verifier:
+            if request_token_secret or oauth_verifier_stored:
                 token_data = {
                     "request_token_secret": request_token_secret or "",
-                    "oauth_verifier": oauth_verifier or "",
+                    "oauth_verifier": oauth_verifier_stored or "",
                 }
             else:
                 token_data = {}
@@ -178,7 +180,7 @@ def exchange_access_token():
         return {"error": "Missing or invalid oauth_token"}, 400
 
     oauth_token_secret = token_data.get("request_token_secret")
-    oauth_verifier = oauth_verifier or token_data.get("oauth_verifier")
+    oauth_verifier = oauth_verifier_param or token_data.get("oauth_verifier")
 
     if not oauth_verifier:
         return {"error": "Authorization not completed yet"}, 409
