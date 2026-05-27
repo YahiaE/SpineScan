@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 from flask import Flask, g, redirect, request, session
@@ -26,7 +27,23 @@ from services.startup_tracker import initialize_startup_tracker, is_cold_start
 logger = logging.getLogger(__name__)
 
 
+def _configure_logging():
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=getattr(
+                logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO
+            ),
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
+    logging.getLogger().setLevel(
+        getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+    )
+    logger.setLevel(logging.INFO)
+
+
 def create_app():
+    _configure_logging()
+
     app = Flask(__name__)
     app.secret_key = FLASK_SECRET_KEY
 
@@ -64,6 +81,9 @@ def create_app():
 
     @app.before_request
     def before_request():
+        if request.path.startswith("/auth/") or request.path.startswith("/api/auth/"):
+            logger.info("incoming request %s %s", request.method, request.path)
+
         if CSRF_ORIGIN_ENFORCEMENT and request.method in {
             "POST",
             "PUT",
@@ -89,6 +109,19 @@ def create_app():
                 status_code=response.status_code,
                 duration_seconds=duration,
             )
+
+            if (
+                request.path.startswith("/auth/")
+                or request.path.startswith("/api/auth/")
+                or response.status_code >= 400
+            ):
+                logger.info(
+                    "request complete %s %s -> %s in %.3fs",
+                    request.method,
+                    request.path,
+                    response.status_code,
+                    duration,
+                )
 
             # Add cold-start indicators for client UX awareness
             if is_cold_start(duration):
