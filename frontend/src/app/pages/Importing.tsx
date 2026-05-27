@@ -163,6 +163,14 @@ export function Importing() {
           count: addedCount,
           failedCount: payload.failed_count,
           folderName: selectedFolderName,
+          scannedEntries: payload.results.map((result) => ({
+            id: result.id,
+            artist: result.artist,
+            title: result.title,
+            status: result.status,
+            message: result.message,
+            releaseId: result.release_id,
+          })),
         });
 
         if (payload.failed_count === 0) {

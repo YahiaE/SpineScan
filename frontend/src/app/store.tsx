@@ -60,6 +60,14 @@ export interface ScanHistoryEntry {
   count: number;
   failedCount: number;
   folderName?: string;
+  scannedEntries?: Array<{
+    id: string;
+    artist: string;
+    title: string;
+    status?: ImportResult["status"];
+    message?: string;
+    releaseId?: number;
+  }>;
 }
 
 interface AppState {
