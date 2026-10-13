@@ -23,6 +23,7 @@ from services.discogs_service import (
     get_discogs_client,
     get_discogs_collection_folders,
     get_discogs_identity,
+    get_lookup_statuses,
     get_lookup_queue_stats,
     load_collection_cache_membership,
     build_lookup_request_context,
@@ -182,6 +183,71 @@ def validate_entries():
         validations.append({"id": entry_id, **match})
 
     return jsonify({"validations": validations})
+
+
+@discogs_bp.route("/validation-status", methods=["POST"])
+def validation_status():
+    body = request.get_json(silent=True)
+    entries = body.get("entries") if body else None
+
+    if not isinstance(entries, list) or not entries:
+        return jsonify({"error": "Missing 'entries' in request body"}), 400
+
+    if len(entries) > VALIDATE_MAX_ENTRIES:
+        return (
+            jsonify(
+                {
+                    "error": f"Too many entries. Maximum allowed is {VALIDATE_MAX_ENTRIES}",
+                }
+            ),
+            413,
+        )
+
+    if not _consume_user_rate_slot(
+        "validation-status", VALIDATE_REQUESTS_PER_WINDOW * 4
+    ):
+        return jsonify({"error": "Validation status rate limit exceeded."}), 429
+
+    try:
+        get_discogs_client()
+    except ValueError:
+        return jsonify({"error": "User not authenticated"}), 401
+
+    valid_entries = []
+    immediate_results = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("id") is None:
+            return jsonify({"error": "Each entry must include an 'id'"}), 400
+
+        artist = str(entry.get("artist", "")).strip()
+        title = str(entry.get("title", "")).strip()
+        if not artist or not title:
+            immediate_results.append(
+                {
+                    "id": entry["id"],
+                    "status": "invalid",
+                    "message": "Artist and title are required",
+                }
+            )
+        elif len(artist) > 200 or len(title) > 200:
+            immediate_results.append(
+                {
+                    "id": entry["id"],
+                    "status": "invalid",
+                    "message": "Artist and title must be 200 characters or fewer",
+                }
+            )
+        else:
+            valid_entries.append(
+                {"id": entry["id"], "artist": artist, "title": title}
+            )
+
+    status_payload = get_lookup_statuses(valid_entries) if valid_entries else {
+        "validations": [],
+        "retry_ids": [],
+    }
+    status_payload["validations"] = immediate_results + status_payload["validations"]
+    return jsonify(status_payload)
 
 
 @discogs_bp.route("/import", methods=["POST"])

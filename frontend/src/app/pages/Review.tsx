@@ -28,6 +28,7 @@ type ValidationResponse = {
     matched_artist?: string;
     matched_title?: string;
   }>;
+  retry_ids?: string[];
 };
 
 export function Review() {
@@ -78,23 +79,27 @@ export function Review() {
 
   const requestValidation = async (
     albumsToValidate: Array<{ id: string; artist: string; title: string }>,
-    options?: { background?: boolean },
+    options?: { background?: boolean; statusOnly?: boolean },
   ) => {
     if (albumsToValidate.length === 0) return;
 
     const isBackground = options?.background ?? false;
+    const statusOnly = options?.statusOnly ?? false;
     if (!isBackground) {
       setValidating(true);
       setValidationError(null);
     }
 
     try {
-      const res = await apiFetch(`${API_BASE}/discogs/validate`, {
-        method: "POST",
+      const res = await apiFetch(
+        `${API_BASE}/discogs/${statusOnly ? "validation-status" : "validate"}`,
+        {
+          method: "POST",
 
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entries: albumsToValidate }),
-      });
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entries: albumsToValidate }),
+        },
+      );
 
       if (!res.ok) {
         const payload = await res.json().catch(() => null);
@@ -103,6 +108,28 @@ export function Review() {
 
       const payload = (await res.json()) as ValidationResponse;
       applyValidationPayload(payload);
+
+      if (statusOnly && payload.retry_ids?.length) {
+        const retryIds = new Set(payload.retry_ids);
+        const entriesToRetry = albumsToValidate.filter((album) =>
+          retryIds.has(album.id),
+        );
+        if (entriesToRetry.length > 0) {
+          const retryRes = await apiFetch(`${API_BASE}/discogs/validate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ entries: entriesToRetry }),
+          });
+
+          if (!retryRes.ok) {
+            const retryPayload = await retryRes.json().catch(() => null);
+            throw new Error(retryPayload?.error ?? "Validation failed");
+          }
+
+          const retryPayload = (await retryRes.json()) as ValidationResponse;
+          applyValidationPayload(retryPayload);
+        }
+      }
     } catch (error) {
       setValidationError(
         error instanceof Error ? error.message : "Validation failed",
@@ -268,7 +295,7 @@ export function Review() {
           artist: album.artist,
           title: album.title,
         })),
-        { background: true },
+        { background: true, statusOnly: true },
       );
     }, pollDelay);
 

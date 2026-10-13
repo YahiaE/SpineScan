@@ -1577,6 +1577,10 @@ def album_lookup_pending_key(normalized_key):
     return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:{normalized_key}"
 
 
+def album_lookup_result_key(normalized_key):
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:result:{normalized_key}"
+
+
 def pending_lookup_index_key():
     return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:pending:index"
 
@@ -1621,9 +1625,20 @@ def build_lookup_result_from_row(row, fallback_artist, fallback_title):
 
 
 def read_cached_lookup_result(normalized_key):
-    # Album lookup cache is now durable-only via Supabase `albums`.
-    # Redis remains in use for pending markers, rate limiting, and queue state.
-    return None
+    try:
+        cached_result = redis_conn.get(album_lookup_result_key(normalized_key))
+        if not cached_result:
+            return None
+        if isinstance(cached_result, bytes):
+            cached_result = cached_result.decode("utf-8")
+        result = json.loads(cached_result)
+        return (
+            result
+            if isinstance(result, dict) and result.get("status") == "invalid"
+            else None
+        )
+    except Exception:
+        return None
 
 
 def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
@@ -1636,8 +1651,18 @@ def write_cached_lookup_result(normalized_key, result, ttl_seconds=None):
     }
 
     try:
-        # Keep pending-marker cleanup in Redis so queued lookups can be deduplicated,
-        # but do not write hot lookup results to Redis.
+        if cacheable_result.get("status") == "valid":
+            redis_conn.delete(album_lookup_result_key(normalized_key))
+        elif ttl_seconds and cacheable_result.get("status") == "invalid":
+            redis_conn.setex(
+                album_lookup_result_key(normalized_key),
+                int(ttl_seconds),
+                json.dumps(cacheable_result),
+            )
+    except Exception:
+        pass
+
+    try:
         pending_key = album_lookup_pending_key(normalized_key)
         redis_conn.delete(pending_key)
         _untrack_pending_lookup_key(pending_key)
@@ -1663,6 +1688,85 @@ def fetch_lookup_row_from_postgres(normalized_key):
 
     rows = getattr(response, "data", None) or []
     return rows[0] if rows else None
+
+
+def get_lookup_statuses(entries):
+    """Read lookup results and pending markers in batches without calling Discogs."""
+    keys_by_entry_id = {
+        entry.get("id"): album_lookup_normalized_key(entry["artist"], entry["title"])
+        for entry in entries
+    }
+    normalized_keys = sorted(set(keys_by_entry_id.values()))
+    rows_by_key = {}
+    database_read_succeeded = False
+
+    try:
+        response = (
+            supabase.table("albums")
+            .select("artist, album, normalized_key, discogs_release_id")
+            .in_("normalized_key", normalized_keys)
+            .execute()
+        )
+        rows_by_key = {
+            row["normalized_key"]: row
+            for row in (getattr(response, "data", None) or [])
+        }
+        database_read_succeeded = True
+    except Exception as error:
+        print(f"Failed to read lookup statuses from Supabase: {error}")
+
+    result_cache_keys = [album_lookup_result_key(key) for key in normalized_keys]
+    pending_keys = [album_lookup_pending_key(key) for key in normalized_keys]
+    try:
+        cached_results = redis_conn.mget(result_cache_keys)
+        pending_values = redis_conn.mget(pending_keys)
+    except Exception:
+        cached_results = [None] * len(normalized_keys)
+        pending_values = [None] * len(normalized_keys)
+
+    cached_by_key = {}
+    pending_by_key = {}
+    for key, cached_result, pending_value in zip(
+        normalized_keys, cached_results, pending_values
+    ):
+        if cached_result:
+            try:
+                if isinstance(cached_result, bytes):
+                    cached_result = cached_result.decode("utf-8")
+                parsed_result = json.loads(cached_result)
+                if isinstance(parsed_result, dict):
+                    cached_by_key[key] = parsed_result
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                pass
+        pending_by_key[key] = bool(pending_value)
+
+    validations = []
+    retry_ids = []
+    for entry in entries:
+        entry_id = entry.get("id")
+        normalized_key = keys_by_entry_id[entry_id]
+        row = rows_by_key.get(normalized_key)
+        cached_result = cached_by_key.get(normalized_key)
+
+        if row:
+            result = build_lookup_result_from_row(
+                row,
+                entry.get("artist", ""),
+                entry.get("title", ""),
+            )
+        elif cached_result:
+            result = cached_result
+        elif pending_by_key.get(normalized_key):
+            result = build_pending_lookup_result()
+        elif not database_read_succeeded:
+            result = build_pending_lookup_result("Waiting for lookup status")
+        else:
+            retry_ids.append(entry_id)
+            continue
+
+        validations.append({"id": entry_id, **result})
+
+    return {"validations": validations, "retry_ids": retry_ids}
 
 
 def persist_lookup_result(normalized_key, requested_artist, requested_title, match):
@@ -2021,16 +2125,22 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
     """
     normalized_key = album_lookup_normalized_key(artist, title)
 
-    cached_result = read_cached_lookup_result(normalized_key)
-    if cached_result:
-        return cached_result
-
     persisted_row = fetch_lookup_row_from_postgres(normalized_key)
     if persisted_row:
         return write_cached_lookup_result(
             normalized_key,
             build_lookup_result_from_row(persisted_row, artist, title),
         )
+
+    cached_result = read_cached_lookup_result(normalized_key)
+    if cached_result:
+        return cached_result
+
+    try:
+        if redis_conn.get(album_lookup_pending_key(normalized_key)):
+            return build_pending_lookup_result()
+    except Exception:
+        pass
 
     context = lookup_context or build_lookup_request_context()
 
@@ -2042,8 +2152,28 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
     access_token = context.get("access_token")
     access_token_secret = context.get("access_token_secret")
 
-    # Hybrid strategy: serve lookups synchronously while capacity is available,
-    # then overflow additional lookups to the worker queue.
+    if enqueue_if_missing and worker_available:
+        if queue_saturated:
+            return build_degraded_lookup_result()
+
+        try:
+            enqueue_album_lookup_job(
+                artist,
+                title,
+                normalized_key,
+                access_token=access_token,
+                access_token_secret=access_token_secret,
+            )
+        except Exception:
+            record_sync_lookup_failure()
+            open_lookup_breaker("queue_enqueue_failed")
+            context["breaker_open"] = True
+            return build_degraded_lookup_result(
+                "Lookup queue unavailable. Please retry shortly."
+            )
+
+        return build_pending_lookup_result()
+
     if DISCOGS_SYNC_LOOKUP_ENABLED:
         try:
             return try_run_sync_lookup_with_capacity(artist, title, normalized_key)
@@ -2064,28 +2194,6 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
 
     if not enqueue_if_missing:
         return build_pending_lookup_result("Validation has not completed yet")
-
-    if worker_available and not queue_saturated:
-        try:
-            enqueue_album_lookup_job(
-                artist,
-                title,
-                normalized_key,
-                access_token=access_token,
-                access_token_secret=access_token_secret,
-            )
-        except Exception:
-            record_sync_lookup_failure()
-            open_lookup_breaker("queue_enqueue_failed")
-            context["breaker_open"] = True
-            return build_degraded_lookup_result(
-                "Lookup queue unavailable. Please retry shortly."
-            )
-
-        return build_pending_lookup_result()
-
-    if worker_available and queue_saturated:
-        return build_degraded_lookup_result()
 
     if not DISCOGS_SYNC_LOOKUP_ENABLED:
         open_lookup_breaker("sync_lookup_disabled")
