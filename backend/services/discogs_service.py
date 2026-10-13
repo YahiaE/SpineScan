@@ -1254,11 +1254,17 @@ def _upsert_albums_from_collection_cache(rows_by_key):
         if desired_key and existing_key and existing_key != desired_key:
             stale_keys.append(existing_key)
 
-    for stale_key in sorted(set(stale_keys)):
+    unique_stale_keys = sorted(set(stale_keys))
+    for offset in range(0, len(unique_stale_keys), 500):
         try:
-            supabase.table("albums").delete().eq("normalized_key", stale_key).execute()
+            (
+                supabase.table("albums")
+                .delete()
+                .in_("normalized_key", unique_stale_keys[offset : offset + 500])
+                .execute()
+            )
         except Exception as error:
-            print(f"Failed to delete stale albums key {stale_key}: {error}")
+            print(f"Failed to delete stale albums keys: {error}")
 
 
 def _mirror_albums_from_durable_collection_cache(discogs_username, folder_id):
@@ -1370,66 +1376,65 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
         return None
 
 
-def cache_collection_membership_entry(
+def sync_collection_membership_cache(
     discogs_username,
     folder_id,
-    release_id,
-    album_key,
+    entries_to_cache,
+    entries_to_mirror,
 ):
-    """Update collection cache entry in Supabase after successful import.
+    """Batch collection membership writes and their album-table mirrors."""
+    if not entries_to_cache and not entries_to_mirror:
+        return
 
-    This persists the album to the collection cache so future imports
-    can detect duplicates against Supabase directly (no Redis involved).
-    """
-    normalized_release_id = int(release_id)
-    serialized_album_key = serialize_album_identity_key(album_key)
+    normalized_cache_entries = {
+        int(release_id): album_key
+        for release_id, album_key in entries_to_cache.items()
+    }
+    normalized_mirror_entries = [
+        (int(release_id), album_key)
+        for release_id, album_key in entries_to_mirror
+    ]
+    timestamp = utc_timestamp()
 
-    try:
-        (
-            supabase.table("discogs_collection_cache")
-            .upsert(
-                {
-                    "discogs_username": discogs_username,
-                    "folder_id": int(folder_id),
-                    "release_id": normalized_release_id,
-                    "album_key": serialized_album_key,
-                    "last_seen_at": utc_timestamp(),
-                },
-                on_conflict="discogs_username,folder_id,release_id",
+    if normalized_cache_entries:
+        collection_rows = [
+            {
+                "discogs_username": discogs_username,
+                "folder_id": int(folder_id),
+                "release_id": release_id,
+                "album_key": serialize_album_identity_key(album_key),
+                "last_seen_at": timestamp,
+            }
+            for release_id, album_key in normalized_cache_entries.items()
+        ]
+        try:
+            (
+                supabase.table("discogs_collection_cache")
+                .upsert(
+                    collection_rows,
+                    on_conflict="discogs_username,folder_id,release_id",
+                )
+                .execute()
             )
-            .execute()
-        )
-    except Exception as error:
-        print(f"Failed to update collection cache: {error}")
+        except Exception as error:
+            print(f"Failed to update collection cache: {error}")
 
-    _upsert_albums_from_collection_cache(
-        {
-            serialized_album_key: {
-                "artist": album_key[0],
-                "album": album_key[1],
-                "normalized_key": serialized_album_key,
-                "discogs_release_id": normalized_release_id,
-                "updated_at": utc_timestamp(),
-            }
+    album_rows_by_key = {}
+    album_entries = [
+        *normalized_mirror_entries,
+        *normalized_cache_entries.items(),
+    ]
+    for release_id, album_key in album_entries:
+        serialized_album_key = serialize_album_identity_key(album_key)
+        album_rows_by_key[serialized_album_key] = {
+            "artist": album_key[0],
+            "album": album_key[1],
+            "normalized_key": serialized_album_key,
+            "discogs_release_id": release_id,
+            "updated_at": timestamp,
         }
-    )
 
-
-def mirror_collection_cache_entry_to_albums(release_id, album_key):
-    """Ensure one cached collection entry is present in albums."""
-    normalized_release_id = int(release_id)
-    serialized_album_key = serialize_album_identity_key(album_key)
-    _upsert_albums_from_collection_cache(
-        {
-            serialized_album_key: {
-                "artist": album_key[0],
-                "album": album_key[1],
-                "normalized_key": serialized_album_key,
-                "discogs_release_id": normalized_release_id,
-                "updated_at": utc_timestamp(),
-            }
-        }
-    )
+    _upsert_albums_from_collection_cache(album_rows_by_key)
 
 
 def load_collection_cache_membership(discogs_username, folder_id):

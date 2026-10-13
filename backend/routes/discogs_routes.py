@@ -18,7 +18,6 @@ from services.discogs_service import (
     add_release_to_folder,
     album_identity_key,
     build_import_request_fingerprint,
-    cache_collection_membership_entry,
     ensure_collection_membership_cache_warm,
     get_collection_folder,
     get_discogs_client,
@@ -28,8 +27,8 @@ from services.discogs_service import (
     get_lookup_queue_stats,
     build_lookup_request_context,
     is_discogs_duplicate_error,
-    mirror_collection_cache_entry_to_albums,
     resolve_release_match,
+    sync_collection_membership_cache,
 )
 from services.import_history_service import (
     create_import_history_entry,
@@ -305,7 +304,7 @@ def import_status():
         return jsonify({"error": "User not authenticated"}), 401
 
     result_key, lock_key = _build_import_idempotency_keys(folder_id, entries)
-    cached_result = redis_conn.get(result_key)
+    cached_result, lock_value = redis_conn.mget([result_key, lock_key])
     if cached_result:
         try:
             return jsonify(
@@ -314,7 +313,7 @@ def import_status():
         except json.JSONDecodeError:
             redis_conn.delete(result_key)
 
-    if redis_conn.get(lock_key):
+    if lock_value:
         return jsonify({"status": "in_progress"}), 202
 
     return jsonify({"status": "not_found"}), 404
@@ -435,6 +434,8 @@ def import_entries():
         pending_release_ids = set()
         pending_album_keys = set()
         results = []
+        collection_entries_to_cache = {}
+        album_entries_to_mirror = []
         cached_release_ids, cached_album_keys = collection_membership or (set(), set())
 
         for entry in entries:
@@ -518,9 +519,8 @@ def import_entries():
                 continue
 
             if normalized_release_id in cached_release_ids:
-                mirror_collection_cache_entry_to_albums(
-                    normalized_release_id,
-                    entry_album_key,
+                album_entries_to_mirror.append(
+                    (normalized_release_id, entry_album_key)
                 )
                 results.append(
                     {
@@ -549,9 +549,8 @@ def import_entries():
 
             serialized_entry_album_key = "::".join(entry_album_key)
             if serialized_entry_album_key in cached_album_keys:
-                mirror_collection_cache_entry_to_albums(
-                    normalized_release_id,
-                    entry_album_key,
+                album_entries_to_mirror.append(
+                    (normalized_release_id, entry_album_key)
                 )
                 results.append(
                     {
@@ -573,11 +572,9 @@ def import_entries():
                 pending_album_keys.add(entry_album_key)
                 cached_release_ids.add(normalized_release_id)
                 cached_album_keys.add(serialized_entry_album_key)
-                cache_collection_membership_entry(
-                    user.username,
-                    folder_id,
-                    normalized_release_id,
-                    entry_album_key,
+                collection_entries_to_cache[normalized_release_id] = entry_album_key
+                album_entries_to_mirror.append(
+                    (normalized_release_id, entry_album_key)
                 )
                 results.append(
                     {
@@ -592,11 +589,9 @@ def import_entries():
                 if is_discogs_duplicate_error(e):
                     cached_release_ids.add(normalized_release_id)
                     cached_album_keys.add(serialized_entry_album_key)
-                    cache_collection_membership_entry(
-                        user.username,
-                        folder_id,
-                        normalized_release_id,
-                        entry_album_key,
+                    collection_entries_to_cache[normalized_release_id] = entry_album_key
+                    album_entries_to_mirror.append(
+                        (normalized_release_id, entry_album_key)
                     )
                     results.append(
                         {
@@ -631,6 +626,13 @@ def import_entries():
                         "message": str(e),
                     }
                 )
+
+        sync_collection_membership_cache(
+            user.username,
+            folder_id,
+            collection_entries_to_cache,
+            album_entries_to_mirror,
+        )
 
         added_count = sum(1 for result in results if result["status"] == "added")
         skipped_count = sum(1 for result in results if result["status"] == "skipped")
