@@ -238,8 +238,8 @@ def import_entries():
     )
 
     if not lock_acquired:
-        deadline = time.time() + 4.0
-        while time.time() < deadline:
+        deadline = time.monotonic() + min(IMPORT_IDEMPOTENCY_TTL_SECONDS, 110)
+        while time.monotonic() < deadline:
             cached_import_result = redis_conn.get(import_result_key)
             if cached_import_result:
                 try:
@@ -247,9 +247,28 @@ def import_entries():
                 except json.JSONDecodeError:
                     redis_conn.delete(import_result_key)
                     break
+
+            if not redis_conn.get(import_lock_key):
+                lock_acquired = redis_conn.set(
+                    import_lock_key,
+                    "1",
+                    nx=True,
+                    ex=IMPORT_IDEMPOTENCY_TTL_SECONDS,
+                )
+                if lock_acquired:
+                    cached_import_result = redis_conn.get(import_result_key)
+                    if cached_import_result:
+                        redis_conn.delete(import_lock_key)
+                        try:
+                            return jsonify(json.loads(cached_import_result))
+                        except json.JSONDecodeError:
+                            redis_conn.delete(import_result_key)
+                    break
+
             time.sleep(0.1)
 
-        return jsonify({"error": "An identical import is already in progress"}), 409
+        if not lock_acquired:
+            return jsonify({"error": "An identical import is already in progress"}), 409
 
     try:
         try:
