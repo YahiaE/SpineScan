@@ -1124,12 +1124,38 @@ def find_best_release_match(
 
 
 def add_release_to_folder(client, username, folder_id, release_id):
-    """Add a release to a Discogs collection folder."""
+    """Add a release without requiring Discogs to return a JSON body."""
     url = (
         f"{client._base_url}/users/{username}/collection/"
         f"folders/{folder_id}/releases/{release_id}"
     )
-    return call_discogs(lambda: client._post(url, None), authenticated=True)
+
+    def post_release():
+        headers = {
+            "Accept-Encoding": "gzip",
+            "User-Agent": client.user_agent,
+        }
+        content, status_code = client._fetcher.fetch(
+            client,
+            "POST",
+            url,
+            headers=headers,
+        )
+        if 200 <= status_code < 300:
+            return None
+
+        try:
+            error_body = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            error_body = {}
+        message = (
+            error_body.get("message")
+            if isinstance(error_body, dict)
+            else None
+        )
+        raise HTTPError(message or "Discogs rejected the collection update", status_code)
+
+    return call_discogs(post_release, authenticated=True)
 
 
 def get_collection_folder(collection_folders, folder_id):
