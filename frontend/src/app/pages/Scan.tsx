@@ -1,10 +1,77 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { X, Check, CameraOff, Zap, ZapOff } from "lucide-react";
+import {
+  X,
+  Check,
+  Camera,
+  CameraOff,
+  ImagePlus,
+  Zap,
+  ZapOff,
+} from "lucide-react";
 import { useAppContext } from "../store";
 import { apiFetch } from "../apiClient";
 
 const API_BASE = "/api";
+const MAX_PHOTO_DIMENSION = 2000;
+
+async function normalizePhotoFile(file: File): Promise<Blob> {
+  let image: CanvasImageSource;
+  let width: number;
+  let height: number;
+  let releaseImage = () => {};
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    image = bitmap;
+    width = bitmap.width;
+    height = bitmap.height;
+    releaseImage = () => bitmap.close();
+  } catch {
+    const imageUrl = URL.createObjectURL(file);
+    const element = new Image();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        element.onload = () => resolve();
+        element.onerror = () => reject(new Error("Could not read this photo."));
+        element.src = imageUrl;
+      });
+    } catch (error) {
+      URL.revokeObjectURL(imageUrl);
+      throw error;
+    }
+    image = element;
+    width = element.naturalWidth;
+    height = element.naturalHeight;
+    releaseImage = () => URL.revokeObjectURL(imageUrl);
+  }
+
+  if (!width || !height) {
+    releaseImage();
+    throw new Error("Could not read this photo.");
+  }
+
+  const scale = Math.min(1, MAX_PHOTO_DIMENSION / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  const context = canvas.getContext("2d");
+  if (!context) {
+    releaseImage();
+    throw new Error("Could not prepare this photo.");
+  }
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  releaseImage();
+
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) =>
+        blob ? resolve(blob) : reject(new Error("Could not prepare this photo.")),
+      "image/jpeg",
+      0.88,
+    );
+  });
+}
 
 type TorchCapableTrack = MediaStreamTrack & {
   applyConstraints?: (constraints: MediaTrackConstraints) => Promise<void>;
@@ -24,6 +91,8 @@ export function Scan() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement>(null);
+  const photoLibraryInputRef = useRef<HTMLInputElement>(null);
 
   const [preview, setPreview] = useState<string | null>(null);
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
@@ -33,6 +102,7 @@ export function Scan() {
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [preparingPhoto, setPreparingPhoto] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const syncTorchAvailability = (stream: MediaStream | null) => {
@@ -193,6 +263,33 @@ export function Scan() {
     startCamera();
   };
 
+  const handlePhotoSelection = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+
+    setPreparingPhoto(true);
+    setCameraError(null);
+    setCaptureError(null);
+    setUploadError(null);
+    try {
+      const blob = await normalizePhotoFile(file);
+      await stopCamera();
+      setPreview(URL.createObjectURL(blob));
+      setPreviewBlob(blob);
+    } catch (e) {
+      setCaptureError(
+        e instanceof Error
+          ? e.message
+          : "Could not read this photo. Try a JPEG or PNG image.",
+      );
+    } finally {
+      setPreparingPhoto(false);
+    }
+  };
+
   const handleUsePhoto = async () => {
     if (!preview || !previewBlob) return;
     setUploading(true);
@@ -229,9 +326,30 @@ export function Scan() {
     }
   };
 
+  const photoInputs = (
+    <>
+      <input
+        ref={nativeCameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={(event) => void handlePhotoSelection(event)}
+      />
+      <input
+        ref={photoLibraryInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(event) => void handlePhotoSelection(event)}
+      />
+    </>
+  );
+
   if (cameraError) {
     return (
       <div className="flex flex-col items-center justify-center h-full p-8 gap-4 text-center bg-black">
+        {photoInputs}
         <CameraOff className="w-12 h-12 text-red-400" />
         <p className="text-white font-medium">{cameraError}</p>
         <button
@@ -240,12 +358,32 @@ export function Scan() {
         >
           Try again
         </button>
+        <button
+          onClick={() => nativeCameraInputRef.current?.click()}
+          disabled={preparingPhoto}
+          className="flex items-center gap-2 rounded-xl border border-neutral-700 px-5 py-3 text-white transition-colors hover:bg-neutral-900 disabled:opacity-60"
+          type="button"
+        >
+          <Camera className="h-4 w-4" />
+          Use phone camera
+        </button>
+        <button
+          onClick={() => photoLibraryInputRef.current?.click()}
+          disabled={preparingPhoto}
+          className="flex items-center gap-2 rounded-xl border border-neutral-700 px-5 py-3 text-white transition-colors hover:bg-neutral-900 disabled:opacity-60"
+          type="button"
+        >
+          <ImagePlus className="h-4 w-4" />
+          {preparingPhoto ? "Preparing photo..." : "Choose a photo"}
+        </button>
+        {captureError && <p className="text-red-400 text-sm">{captureError}</p>}
       </div>
     );
   }
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-black relative overflow-hidden">
+      {photoInputs}
       {!preview ? (
         <div
           className="flex-1 min-h-0 relative flex flex-col items-center justify-end overflow-hidden"
@@ -294,6 +432,27 @@ export function Scan() {
               </>
             )}
           </button>
+
+          <div className="absolute top-16 left-0 right-0 z-10 flex justify-center gap-2 px-3">
+            <button
+              onClick={() => nativeCameraInputRef.current?.click()}
+              disabled={preparingPhoto}
+              className="flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75 disabled:opacity-60"
+              type="button"
+            >
+              <Camera className="h-4 w-4" />
+              Phone camera
+            </button>
+            <button
+              onClick={() => photoLibraryInputRef.current?.click()}
+              disabled={preparingPhoto}
+              className="flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75 disabled:opacity-60"
+              type="button"
+            >
+              <ImagePlus className="h-4 w-4" />
+              {preparingPhoto ? "Preparing..." : "Choose photo"}
+            </button>
+          </div>
 
           {/* Viewfinder brackets */}
           <div
