@@ -16,3 +16,6 @@ frontend/dist/
 
 # Local env files
 .env
+
+# Redis monitor exports may contain sensitive job metadata
+redis-monitor.csv

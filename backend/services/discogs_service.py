@@ -401,6 +401,20 @@ def _get_auth_session_token_data(auth_session_id):
     return token_data
 
 
+def get_discogs_auth_tokens_for_session(auth_session_id):
+    """Resolve Discogs credentials inside the worker from an opaque session ID."""
+    if not auth_session_id:
+        return None, None
+
+    token_data = _get_auth_session_token_data(auth_session_id)
+    access_token = token_data.get("access_token")
+    access_token_secret = token_data.get("access_token_secret")
+    if not access_token or not access_token_secret:
+        return None, None
+
+    return access_token, access_token_secret
+
+
 def get_discogs_client():
     """Create an authenticated Discogs client from the current session."""
     access_token, access_token_secret = get_discogs_auth_tokens()
@@ -1702,6 +1716,74 @@ def fetch_lookup_row_from_postgres(normalized_key):
     return rows[0] if rows else None
 
 
+def prefetch_release_lookup_states(entries):
+    """Batch-load durable, negative-cache, and pending state for validation entries."""
+    normalized_keys = sorted(
+        {
+            album_lookup_normalized_key(entry["artist"], entry["title"])
+            for entry in entries
+            if entry.get("artist") and entry.get("title")
+        }
+    )
+    if not normalized_keys:
+        return {}
+
+    rows_by_key = {}
+    database_read_succeeded = False
+    try:
+        response = (
+            supabase.table("albums")
+            .select("artist, album, normalized_key, discogs_release_id")
+            .in_("normalized_key", normalized_keys)
+            .execute()
+        )
+        rows_by_key = {
+            row["normalized_key"]: row
+            for row in (getattr(response, "data", None) or [])
+        }
+        database_read_succeeded = True
+    except Exception as error:
+        print(f"Failed to batch-read album lookup states: {error}")
+
+    result_cache_keys = [album_lookup_result_key(key) for key in normalized_keys]
+    pending_keys = [album_lookup_pending_key(key) for key in normalized_keys]
+    redis_read_succeeded = False
+    cached_results = [None] * len(normalized_keys)
+    pending_values = [None] * len(normalized_keys)
+    try:
+        lookup_values = redis_conn.mget(result_cache_keys + pending_keys)
+        cached_results = lookup_values[: len(normalized_keys)]
+        pending_values = lookup_values[len(normalized_keys) :]
+        redis_read_succeeded = True
+    except Exception:
+        pass
+
+    states_by_key = {}
+    for index, normalized_key in enumerate(normalized_keys):
+        cached_result = cached_results[index]
+        if isinstance(cached_result, bytes):
+            cached_result = cached_result.decode("utf-8")
+        try:
+            cached_result = json.loads(cached_result) if cached_result else None
+        except (json.JSONDecodeError, TypeError):
+            cached_result = None
+
+        states_by_key[normalized_key] = {
+            "row": rows_by_key.get(normalized_key),
+            "cached_result": (
+                cached_result
+                if isinstance(cached_result, dict)
+                and cached_result.get("status") == "invalid"
+                else None
+            ),
+            "pending": bool(pending_values[index]),
+            "database_read_succeeded": database_read_succeeded,
+            "redis_read_succeeded": redis_read_succeeded,
+        }
+
+    return states_by_key
+
+
 def get_lookup_statuses(entries):
     """Read lookup results and pending markers in batches without calling Discogs."""
     keys_by_entry_id = {
@@ -1730,8 +1812,9 @@ def get_lookup_statuses(entries):
     result_cache_keys = [album_lookup_result_key(key) for key in normalized_keys]
     pending_keys = [album_lookup_pending_key(key) for key in normalized_keys]
     try:
-        cached_results = redis_conn.mget(result_cache_keys)
-        pending_values = redis_conn.mget(pending_keys)
+        lookup_values = redis_conn.mget(result_cache_keys + pending_keys)
+        cached_results = lookup_values[: len(normalized_keys)]
+        pending_values = lookup_values[len(normalized_keys) :]
     except Exception:
         cached_results = [None] * len(normalized_keys)
         pending_values = [None] * len(normalized_keys)
@@ -1844,8 +1927,7 @@ def enqueue_album_lookup_job(
     artist,
     title,
     normalized_key,
-    access_token=None,
-    access_token_secret=None,
+    auth_session_id=None,
 ):
     pending_key = album_lookup_pending_key(normalized_key)
     acquired = redis_conn.set(
@@ -1863,14 +1945,13 @@ def enqueue_album_lookup_job(
         pass
 
     try:
-        if access_token and access_token_secret:
+        if auth_session_id:
             job = lookup_queue.enqueue(
                 run_album_lookup_job_authenticated,
                 artist,
                 title,
                 normalized_key,
-                access_token,
-                access_token_secret,
+            auth_session_id,
                 job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
                 ttl=DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
                 result_ttl=0,
@@ -1898,15 +1979,23 @@ def enqueue_album_lookup_job(
 
 def build_lookup_request_context():
     """Build per-request lookup context so queue/worker checks are not repeated per entry."""
-    worker_available = has_lookup_worker_available()
+    try:
+        queue_stats = get_lookup_queue_stats()
+    except Exception:
+        queue_stats = None
+
+    worker_available = (
+        queue_stats.get("workers_online", 0) > 0
+        if queue_stats is not None
+        else has_lookup_worker_available()
+    )
     queue_saturated = False
     if worker_available:
-        queue_saturated = is_lookup_queue_saturated()
+        queue_saturated = is_lookup_queue_saturated(queue_stats)
 
-    access_token = None
-    access_token_secret = None
+    auth_session_id = None
     try:
-        access_token, access_token_secret = get_discogs_auth_tokens()
+        auth_session_id = session.get("auth_session_id")
     except RuntimeError:
         pass
 
@@ -1917,8 +2006,7 @@ def build_lookup_request_context():
         "breaker_reason": breaker_reason,
         "worker_available": worker_available,
         "queue_saturated": queue_saturated,
-        "access_token": access_token,
-        "access_token_secret": access_token_secret,
+        "auth_session_id": auth_session_id,
     }
 
 
@@ -2066,9 +2154,9 @@ def get_lookup_queue_stats():
     return dict(stats)
 
 
-def is_lookup_queue_saturated():
+def is_lookup_queue_saturated(stats=None):
     try:
-        stats = get_lookup_queue_stats()
+        stats = stats or get_lookup_queue_stats()
     except Exception:
         return False
 
@@ -2085,22 +2173,20 @@ def is_lookup_queue_saturated():
 
 def run_sync_lookup_with_timeout(artist, title, normalized_key):
     """Execute sync fallback in a worker thread so request path has a hard timeout."""
-    access_token = None
-    access_token_secret = None
+    auth_session_id = None
     try:
-        access_token, access_token_secret = get_discogs_auth_tokens()
+        auth_session_id = session.get("auth_session_id")
     except RuntimeError:
         # No request context (for example tests/background calls), so fallback to public lookup.
         pass
 
-    if access_token and access_token_secret:
+    if auth_session_id:
         future = _sync_lookup_executor.submit(
             run_album_lookup_job_authenticated,
             artist,
             title,
             normalized_key,
-            access_token,
-            access_token_secret,
+            auth_session_id,
         )
     else:
         future = _sync_lookup_executor.submit(
@@ -2136,33 +2222,48 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
     but will not enqueue a worker job on cache misses.
     """
     normalized_key = album_lookup_normalized_key(artist, title)
+    context = lookup_context or build_lookup_request_context()
+    prefetched_state = context.get("prefetched_lookup_states", {}).get(
+        normalized_key
+    )
 
-    persisted_row = fetch_lookup_row_from_postgres(normalized_key)
+    persisted_row = (
+        prefetched_state.get("row")
+        if prefetched_state and prefetched_state.get("database_read_succeeded")
+        else fetch_lookup_row_from_postgres(normalized_key)
+    )
     if persisted_row:
+        if prefetched_state:
+            return build_lookup_result_from_row(persisted_row, artist, title)
         return write_cached_lookup_result(
             normalized_key,
             build_lookup_result_from_row(persisted_row, artist, title),
         )
 
-    cached_result = read_cached_lookup_result(normalized_key)
+    cached_result = (
+        prefetched_state.get("cached_result")
+        if prefetched_state and prefetched_state.get("redis_read_succeeded")
+        else read_cached_lookup_result(normalized_key)
+    )
     if cached_result:
         return cached_result
 
-    try:
-        if redis_conn.get(album_lookup_pending_key(normalized_key)):
+    if prefetched_state and prefetched_state.get("redis_read_succeeded"):
+        if prefetched_state.get("pending"):
             return build_pending_lookup_result()
-    except Exception:
-        pass
-
-    context = lookup_context or build_lookup_request_context()
+    else:
+        try:
+            if redis_conn.get(album_lookup_pending_key(normalized_key)):
+                return build_pending_lookup_result()
+        except Exception:
+            pass
 
     if context.get("breaker_open"):
         return build_degraded_lookup_result()
 
     worker_available = bool(context.get("worker_available"))
     queue_saturated = bool(context.get("queue_saturated"))
-    access_token = context.get("access_token")
-    access_token_secret = context.get("access_token_secret")
+    auth_session_id = context.get("auth_session_id")
 
     if enqueue_if_missing and worker_available:
         if queue_saturated:
@@ -2173,8 +2274,7 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
                 artist,
                 title,
                 normalized_key,
-                access_token=access_token,
-                access_token_secret=access_token_secret,
+                auth_session_id=auth_session_id,
             )
         except Exception:
             record_sync_lookup_failure()
@@ -2240,13 +2340,23 @@ def run_album_lookup_job_authenticated(
     artist,
     title,
     normalized_key,
-    access_token,
-    access_token_secret,
+    auth_session_id,
+    legacy_access_token_secret=None,
 ):
-    """Sync lookup path that uses user's Discogs OAuth token (auth RPM bucket)."""
+    """Look up an album using its auth session or credentials from an old queued job."""
     lookup_key = normalized_key or album_lookup_normalized_key(artist, title)
 
     try:
+        if legacy_access_token_secret is not None:
+            access_token = auth_session_id
+            access_token_secret = legacy_access_token_secret
+        else:
+            access_token, access_token_secret = get_discogs_auth_tokens_for_session(
+                auth_session_id
+            )
+        if not access_token or not access_token_secret:
+            raise ValueError("Discogs auth session is unavailable")
+
         client = create_discogs_oauth_client()
         client.set_token(access_token, access_token_secret)
         rate_scope = get_discogs_rate_bucket_scope(

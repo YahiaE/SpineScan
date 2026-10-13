@@ -27,6 +27,7 @@ from services.discogs_service import (
     get_lookup_queue_stats,
     build_lookup_request_context,
     is_discogs_duplicate_error,
+    prefetch_release_lookup_states,
     resolve_release_match,
     sync_collection_membership_cache,
 )
@@ -166,6 +167,15 @@ def validate_entries():
 
     validations = []
     lookup_context = build_lookup_request_context()
+    prefetch_entries = []
+    for entry in entries:
+        artist = str(entry.get("artist", "")).strip()
+        title = str(entry.get("title", "")).strip()
+        if artist and title and len(artist) <= 200 and len(title) <= 200:
+            prefetch_entries.append({"artist": artist, "title": title})
+    lookup_context["prefetched_lookup_states"] = prefetch_release_lookup_states(
+        prefetch_entries
+    )
 
     for entry in entries:
         entry_id = entry.get("id")
