@@ -26,7 +26,6 @@ from services.discogs_service import (
     get_discogs_identity,
     get_lookup_statuses,
     get_lookup_queue_stats,
-    load_collection_cache_membership,
     build_lookup_request_context,
     is_discogs_duplicate_error,
     mirror_collection_cache_entry_to_albums,
@@ -422,8 +421,9 @@ def import_entries():
                 {"error": "Selected collection folder is not available"}
             ), 404
 
+        collection_membership = None
         try:
-            ensure_collection_membership_cache_warm(
+            collection_membership = ensure_collection_membership_cache_warm(
                 d,
                 user.username,
                 target_folder,
@@ -435,10 +435,7 @@ def import_entries():
         pending_release_ids = set()
         pending_album_keys = set()
         results = []
-        cached_release_ids, cached_album_keys = load_collection_cache_membership(
-            user.username,
-            folder_id,
-        )
+        cached_release_ids, cached_album_keys = collection_membership or (set(), set())
 
         for entry in entries:
             entry_id = entry.get("id")

@@ -1348,6 +1348,7 @@ def refresh_collection_cache_from_discogs(client, discogs_username, folder):
 
     # Mirror to albums lookup table
     _upsert_albums_from_collection_cache(album_rows_by_key)
+    return set(durable_rows_by_release), set(album_rows_by_key)
 
 
 def ensure_collection_membership_cache_warm(client, discogs_username, folder):
@@ -1357,10 +1358,11 @@ def ensure_collection_membership_cache_warm(client, discogs_username, folder):
     selects a folder for import, ensuring duplicate checks are always current.
     """
     try:
-        refresh_collection_cache_from_discogs(client, discogs_username, folder)
+        return refresh_collection_cache_from_discogs(client, discogs_username, folder)
     except Exception as error:
         # Non-fatal: duplicate detection falls back to API response
         print(f"Collection cache refresh failed: {error}")
+        return None
 
 
 def cache_collection_membership_entry(
