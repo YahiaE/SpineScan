@@ -1,4 +1,5 @@
 import json
+import secrets
 import time
 
 from discogs_client.exceptions import HTTPError
@@ -62,6 +63,26 @@ def _consume_user_rate_slot(action, max_requests_per_window):
         return current_count <= max_requests_per_window
     except Exception:
         return True
+
+
+def _build_import_idempotency_keys(folder_id, entries):
+    import_fingerprint = build_import_request_fingerprint(folder_id, entries)
+    user_scope = session.get("access_token", "anonymous")
+    key_suffix = f"{user_scope}:{folder_id}:{import_fingerprint}"
+    return (
+        f"discogs:import:result:{key_suffix}",
+        f"discogs:import:lock:{key_suffix}",
+    )
+
+
+def _delete_import_lock_if_owned(lock_key, lock_token):
+    redis_conn.eval(
+        "if redis.call('get', KEYS[1]) == ARGV[1] then "
+        "return redis.call('del', KEYS[1]) else return 0 end",
+        1,
+        lock_key,
+        lock_token,
+    )
 
 
 @discogs_bp.route("/import-history", methods=["GET"])
@@ -250,6 +271,56 @@ def validation_status():
     return jsonify(status_payload)
 
 
+@discogs_bp.route("/import-status", methods=["POST"])
+def import_status():
+    body = request.get_json(silent=True)
+    folder_id = body.get("folder_id") if body else None
+    entries = body.get("entries") if body else None
+
+    if folder_id is None:
+        return jsonify({"error": "Missing 'folder_id' in request body"}), 400
+    if not isinstance(entries, list) or not entries:
+        return jsonify({"error": "Missing 'entries' in request body"}), 400
+    if len(entries) > IMPORT_MAX_ENTRIES:
+        return (
+            jsonify(
+                {
+                    "error": f"Too many entries. Maximum allowed is {IMPORT_MAX_ENTRIES}",
+                }
+            ),
+            413,
+        )
+    try:
+        folder_id = int(folder_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "'folder_id' must be an integer"}), 400
+
+    if not _consume_user_rate_slot(
+        "import-status", max(60, IMPORT_REQUESTS_PER_WINDOW * 30)
+    ):
+        return jsonify({"error": "Import status rate limit exceeded."}), 429
+
+    try:
+        get_discogs_client()
+    except ValueError:
+        return jsonify({"error": "User not authenticated"}), 401
+
+    result_key, lock_key = _build_import_idempotency_keys(folder_id, entries)
+    cached_result = redis_conn.get(result_key)
+    if cached_result:
+        try:
+            return jsonify(
+                {"status": "completed", "result": json.loads(cached_result)}
+            )
+        except json.JSONDecodeError:
+            redis_conn.delete(result_key)
+
+    if redis_conn.get(lock_key):
+        return jsonify({"status": "in_progress"}), 202
+
+    return jsonify({"status": "not_found"}), 404
+
+
 @discogs_bp.route("/import", methods=["POST"])
 def import_entries():
     body = request.get_json(silent=True)
@@ -283,11 +354,9 @@ def import_entries():
     except (TypeError, ValueError):
         return jsonify({"error": "'folder_id' must be an integer"}), 400
 
-    import_fingerprint = build_import_request_fingerprint(folder_id, entries)
-    user_scope = session.get("access_token", "anonymous")
-    import_key_suffix = f"{user_scope}:{folder_id}:{import_fingerprint}"
-    import_result_key = f"discogs:import:result:{import_key_suffix}"
-    import_lock_key = f"discogs:import:lock:{import_key_suffix}"
+    import_result_key, import_lock_key = _build_import_idempotency_keys(
+        folder_id, entries
+    )
 
     cached_import_result = redis_conn.get(import_result_key)
     if cached_import_result:
@@ -296,15 +365,16 @@ def import_entries():
         except json.JSONDecodeError:
             redis_conn.delete(import_result_key)
 
+    lock_token = secrets.token_hex(16)
     lock_acquired = redis_conn.set(
         import_lock_key,
-        "1",
+        lock_token,
         nx=True,
         ex=IMPORT_IDEMPOTENCY_TTL_SECONDS,
     )
 
     if not lock_acquired:
-        deadline = time.monotonic() + min(IMPORT_IDEMPOTENCY_TTL_SECONDS, 110)
+        deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             cached_import_result = redis_conn.get(import_result_key)
             if cached_import_result:
@@ -317,14 +387,14 @@ def import_entries():
             if not redis_conn.get(import_lock_key):
                 lock_acquired = redis_conn.set(
                     import_lock_key,
-                    "1",
+                    lock_token,
                     nx=True,
                     ex=IMPORT_IDEMPOTENCY_TTL_SECONDS,
                 )
                 if lock_acquired:
                     cached_import_result = redis_conn.get(import_result_key)
                     if cached_import_result:
-                        redis_conn.delete(import_lock_key)
+                        _delete_import_lock_if_owned(import_lock_key, lock_token)
                         try:
                             return jsonify(json.loads(cached_import_result))
                         except json.JSONDecodeError:
@@ -334,7 +404,7 @@ def import_entries():
             time.sleep(0.1)
 
         if not lock_acquired:
-            return jsonify({"error": "An identical import is already in progress"}), 409
+            return jsonify({"status": "in_progress"}), 202
 
     try:
         try:
@@ -601,4 +671,4 @@ def import_entries():
 
         return jsonify(response_payload)
     finally:
-        redis_conn.delete(import_lock_key)
+        _delete_import_lock_if_owned(import_lock_key, lock_token)

@@ -8,6 +8,18 @@ import { apiFetch } from "../apiClient";
 const API_BASE = "/api";
 const IMPORT_REQUEST_TIMEOUT_MS = 120000;
 const FINALIZE_REQUEST_TIMEOUT_MS = 15000;
+const IMPORT_STATUS_POLL_INTERVAL_MS = 2000;
+const IMPORT_STATUS_MAX_ATTEMPTS = 180;
+
+type ImportRequest = {
+  folder_id: number;
+  entries: Array<{
+    id: string;
+    artist: string;
+    title: string;
+    release_id?: number;
+  }>;
+};
 
 type ImportResponse = {
   folder_id: number;
@@ -23,6 +35,95 @@ type ImportResponse = {
     message?: string;
   }>;
 };
+
+async function sendImportRequest(body: ImportRequest): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    IMPORT_REQUEST_TIMEOUT_MS,
+  );
+
+  try {
+    return await apiFetch(`${API_BASE}/discogs/import`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function pollImportResult(body: ImportRequest): Promise<ImportResponse | null> {
+  for (let attempt = 0; attempt < IMPORT_STATUS_MAX_ATTEMPTS; attempt += 1) {
+    const response = await apiFetch(`${API_BASE}/discogs/import-status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (response.status === 202) {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, IMPORT_STATUS_POLL_INTERVAL_MS),
+      );
+      continue;
+    }
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.error ?? "Could not check import status");
+    }
+
+    const payload = (await response.json()) as {
+      status: "completed";
+      result: ImportResponse;
+    };
+    return payload.result;
+  }
+
+  throw new Error("Import is still running. Check the collection before retrying.");
+}
+
+async function executeImport(body: ImportRequest): Promise<ImportResponse> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let response: Response;
+    try {
+      response = await sendImportRequest(body);
+    } catch (error) {
+      if (!(error instanceof DOMException) || error.name !== "AbortError") {
+        throw error;
+      }
+
+      const completedResult = await pollImportResult(body);
+      if (completedResult) {
+        return completedResult;
+      }
+      continue;
+    }
+
+    if (response.status === 202) {
+      const completedResult = await pollImportResult(body);
+      if (completedResult) {
+        return completedResult;
+      }
+      continue;
+    }
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.error ?? "Import failed");
+    }
+
+    return (await response.json()) as ImportResponse;
+  }
+
+  throw new Error("Import could not be confirmed. Check your collection before retrying.");
+}
 
 export function Importing() {
   const navigate = useNavigate();
@@ -83,39 +184,15 @@ export function Importing() {
       setCapturedImage(null);
 
       try {
-        const controller = new AbortController();
-        const timeoutId = window.setTimeout(
-          () => controller.abort(),
-          IMPORT_REQUEST_TIMEOUT_MS,
-        );
-
-        let res: Response;
-        try {
-          res = await apiFetch(`${API_BASE}/discogs/import`, {
-            method: "POST",
-
-            signal: controller.signal,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              folder_id: selectedCollectionId,
-              entries: scannedAlbums.map((album) => ({
-                id: album.id,
-                artist: album.artist,
-                title: album.title,
-                release_id: album.validation?.releaseId,
-              })),
-            }),
-          });
-        } finally {
-          window.clearTimeout(timeoutId);
-        }
-
-        if (!res.ok) {
-          const payload = await res.json().catch(() => null);
-          throw new Error(payload?.error ?? "Import failed");
-        }
-
-        const payload = (await res.json()) as ImportResponse;
+        const payload = await executeImport({
+          folder_id: selectedCollectionId,
+          entries: scannedAlbums.map((album) => ({
+            id: album.id,
+            artist: album.artist,
+            title: album.title,
+            release_id: album.validation?.releaseId,
+          })),
+        });
         if (cancelled) return;
 
         const resultMap = Object.fromEntries(

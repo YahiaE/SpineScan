@@ -154,7 +154,9 @@ SpineScan is a split React + Flask app with a staged pipeline.
 4. `backend/routes/discogs_routes.py` protects this route with two idempotency layers:
 	- a Redis result cache keyed by a stable import fingerprint
 	- a Redis lock keyed by the same fingerprint
-5. If an identical import is already running, a second request waits briefly for the cached result, then returns `409` if still in progress.
+5. If an identical import is already running, a second request waits briefly for the cached result, then returns `202` if it is still in progress.
+	- The frontend polls `POST /api/discogs/import-status` until the result is cached.
+	- If the status endpoint finds neither a cached result nor an active lock, the frontend may safely resubmit once.
 6. Once inside the import loop, the backend first warms the selected folder's collection-membership cache with `ensure_collection_membership_cache_warm`.
 7. That warm step:
 	- fetches up to `DISCOGS_COLLECTION_WARM_MAX_PAGES` from the Discogs folder
