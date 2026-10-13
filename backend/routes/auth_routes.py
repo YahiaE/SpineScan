@@ -185,17 +185,22 @@ def exchange_access_token():
     if not oauth_verifier:
         return {"error": "Authorization not completed yet"}, 409
 
+    oauth_stage = "client creation"
     try:
         d = create_discogs_oauth_client()
 
+        oauth_stage = "access-token exchange"
         d.set_token(oauth_token, oauth_token_secret)
         access_token, access_token_secret = call_discogs(
             lambda: d.get_access_token(oauth_verifier),
             authenticated=False,
         )
+
+        oauth_stage = "identity lookup"
         d.set_token(access_token, access_token_secret)
         identity = call_discogs(d.identity, authenticated=True)
 
+        oauth_stage = "token persistence"
         persist_discogs_auth_tokens(
             access_token,
             access_token_secret,
@@ -221,6 +226,7 @@ def exchange_access_token():
             }
         )
     except Exception as e:
+        logger.exception("OAuth access-token exchange failed during %s", oauth_stage)
         return jsonify({"error": str(e)}), 500
 
 

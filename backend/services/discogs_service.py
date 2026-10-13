@@ -1014,6 +1014,7 @@ def iter_release_candidates(
     ][: max(1, DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES)]
 
     seen_release_ids = set()
+    last_search_error = None
 
     for query in queries:
         if budget and not budget.consume():
@@ -1025,7 +1026,8 @@ def iter_release_candidates(
                 authenticated=authenticated,
                 rate_scope=rate_scope,
             )
-        except Exception:
+        except Exception as error:
+            last_search_error = error
             continue
 
         for index, result in enumerate(
@@ -1049,6 +1051,9 @@ def iter_release_candidates(
 
             seen_release_ids.add(release_id)
             yield result
+
+    if last_search_error is not None:
+        raise last_search_error
 
 
 def find_best_release_match(
@@ -1580,7 +1585,7 @@ def album_lookup_pending_key(normalized_key):
 
 
 def album_lookup_result_key(normalized_key):
-    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:result:{normalized_key}"
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:result:v3:{normalized_key}"
 
 
 def pending_lookup_index_key():
