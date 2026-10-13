@@ -93,6 +93,8 @@ Set these environment variables in backend env when needed:
 
 - `DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM` (default: `6`)
 	Hard cap for Discogs calls used by one album lookup.
+- `DISCOGS_LOOKUP_BATCH_SIZE` (default: `4`)
+	Maximum cache-miss albums grouped into one RQ job. Keep batches bounded so a slow lookup does not hold many entries behind it.
 - `DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES` (default: `3`)
 	Maximum query templates tried per lookup.
 - `DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY` (default: `1`)
@@ -104,6 +106,7 @@ Recommended starting values for production load:
 
 ```env
 DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM=5
+DISCOGS_LOOKUP_BATCH_SIZE=4
 DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES=2
 DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY=1
 DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE=0.90

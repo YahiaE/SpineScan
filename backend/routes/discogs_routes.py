@@ -18,6 +18,7 @@ from services.discogs_service import (
     add_release_to_folder,
     album_identity_key,
     build_import_request_fingerprint,
+    enqueue_album_lookup_batch,
     ensure_collection_membership_cache_warm,
     get_collection_folder,
     get_discogs_client,
@@ -27,7 +28,9 @@ from services.discogs_service import (
     get_lookup_queue_stats,
     build_lookup_request_context,
     is_discogs_duplicate_error,
+    open_lookup_breaker,
     prefetch_release_lookup_states,
+    record_sync_lookup_failure,
     resolve_release_match,
     sync_collection_membership_cache,
 )
@@ -167,6 +170,8 @@ def validate_entries():
 
     validations = []
     lookup_context = build_lookup_request_context()
+    lookup_context["defer_lookup_enqueue"] = True
+    lookup_context["lookup_jobs_to_enqueue"] = {}
     prefetch_entries = []
     for entry in entries:
         artist = str(entry.get("artist", "")).strip()
@@ -210,6 +215,20 @@ def validate_entries():
         )
 
         validations.append({"id": entry_id, **match})
+
+    pending_lookup_entries = list(
+        lookup_context["lookup_jobs_to_enqueue"].values()
+    )
+    if pending_lookup_entries:
+        try:
+            enqueue_album_lookup_batch(
+                pending_lookup_entries,
+                auth_session_id=lookup_context.get("auth_session_id"),
+            )
+        except Exception as error:
+            record_sync_lookup_failure()
+            open_lookup_breaker("queue_enqueue_failed")
+            print(f"Failed to enqueue Discogs lookup batch: {error}")
 
     return jsonify({"validations": validations})
 

@@ -32,7 +32,7 @@ from config import (
     DISCOGS_AUTH_REQUEST_LIMIT,
     DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE,
     DISCOGS_LOOKUP_BREAKER_TTL_SECONDS,
-    DISCOGS_LOOKUP_JOB_FUNC,
+    DISCOGS_LOOKUP_BATCH_SIZE,
     DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
     DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM,
     DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
@@ -1923,58 +1923,73 @@ def persist_lookup_result(normalized_key, requested_artist, requested_title, mat
     )
 
 
-def enqueue_album_lookup_job(
-    artist,
-    title,
-    normalized_key,
-    auth_session_id=None,
-):
-    pending_key = album_lookup_pending_key(normalized_key)
-    acquired = redis_conn.set(
-        pending_key,
-        "queued",
-        nx=True,
-        ex=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
-    )
-    if not acquired:
-        return None
+def enqueue_album_lookup_batch(entries, auth_session_id=None):
+    """Queue cache-miss lookups in bounded batches with per-album pending markers."""
+    unique_entries = {}
+    for entry in entries:
+        normalized_key = entry["normalized_key"]
+        unique_entries.setdefault(normalized_key, entry)
 
-    try:
-        _track_pending_lookup_key(pending_key)
-    except Exception:
-        pass
+    queued_count = 0
+    entry_values = list(unique_entries.values())
+    for offset in range(0, len(entry_values), DISCOGS_LOOKUP_BATCH_SIZE):
+        batch = entry_values[offset : offset + DISCOGS_LOOKUP_BATCH_SIZE]
+        acquired_entries = []
+        pending_keys = []
 
-    try:
-        if auth_session_id:
-            job = lookup_queue.enqueue(
-                run_album_lookup_job_authenticated,
-                artist,
-                title,
-                normalized_key,
-            auth_session_id,
-                job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
+        for entry in batch:
+            pending_key = album_lookup_pending_key(entry["normalized_key"])
+            acquired = redis_conn.set(
+                pending_key,
+                "queued",
+                nx=True,
+                ex=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
+            )
+            if acquired:
+                acquired_entries.append(entry)
+                pending_keys.append(pending_key)
+
+        if not acquired_entries:
+            continue
+
+        try:
+            pending_expires_at = time.time() + ALBUM_LOOKUP_PENDING_TTL_SECONDS
+            pending_pipeline = redis_conn.pipeline(transaction=False)
+            for pending_key in pending_keys:
+                pending_pipeline.zadd(
+                    pending_lookup_index_key(),
+                    {pending_key: pending_expires_at},
+                )
+            pending_pipeline.execute()
+
+            batch_worker = (
+                run_album_lookup_batch_authenticated
+                if auth_session_id
+                else run_album_lookup_batch
+            )
+            batch_args = [acquired_entries]
+            if auth_session_id:
+                batch_args.append(auth_session_id)
+
+            lookup_queue.enqueue(
+                batch_worker,
+                *batch_args,
+                job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS
+                * len(acquired_entries),
                 ttl=DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
                 result_ttl=0,
                 failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
             )
-        else:
-            job = lookup_queue.enqueue(
-                DISCOGS_LOOKUP_JOB_FUNC,
-                artist,
-                title,
-                normalized_key,
-                job_timeout=DISCOGS_LOOKUP_JOB_TIMEOUT_SECONDS,
-                ttl=DISCOGS_LOOKUP_MAX_JOB_AGE_SECONDS,
-                result_ttl=0,
-                failure_ttl=ALBUM_LOOKUP_PENDING_TTL_SECONDS,
-            )
-    except Exception:
-        redis_conn.delete(pending_key)
-        _untrack_pending_lookup_key(pending_key)
-        raise
+            queued_count += len(acquired_entries)
+        except Exception:
+            cleanup_pipeline = redis_conn.pipeline(transaction=False)
+            for pending_key in pending_keys:
+                cleanup_pipeline.delete(pending_key)
+                cleanup_pipeline.zrem(pending_lookup_index_key(), pending_key)
+            cleanup_pipeline.execute()
+            raise
 
-    redis_conn.setex(pending_key, ALBUM_LOOKUP_PENDING_TTL_SECONDS, job.id)
-    return job.id
+    return queued_count
 
 
 def build_lookup_request_context():
@@ -2269,11 +2284,27 @@ def resolve_release_match(artist, title, enqueue_if_missing=True, lookup_context
         if queue_saturated:
             return build_degraded_lookup_result()
 
-        try:
-            enqueue_album_lookup_job(
-                artist,
-                title,
+        if context.get("defer_lookup_enqueue"):
+            pending_entries = context.setdefault("lookup_jobs_to_enqueue", {})
+            pending_entries.setdefault(
                 normalized_key,
+                {
+                    "artist": artist,
+                    "title": title,
+                    "normalized_key": normalized_key,
+                },
+            )
+            return build_pending_lookup_result()
+
+        try:
+            enqueue_album_lookup_batch(
+                [
+                    {
+                        "artist": artist,
+                        "title": title,
+                        "normalized_key": normalized_key,
+                    }
+                ],
                 auth_session_id=auth_session_id,
             )
         except Exception:
@@ -2377,3 +2408,44 @@ def run_album_lookup_job_authenticated(
         _untrack_pending_lookup_key(pending_key)
         print(f"Authenticated sync lookup failed for {artist} - {title}: {error}")
         raise
+
+
+def run_album_lookup_batch(entries):
+    """Process a batch of public lookups without failing remaining entries."""
+    results = []
+    for entry in entries:
+        try:
+            results.append(
+                run_album_lookup_job(
+                    entry["artist"],
+                    entry["title"],
+                    entry["normalized_key"],
+                )
+            )
+        except Exception as error:
+            print(
+                "Discogs lookup batch item failed for "
+                f"{entry['artist']} - {entry['title']}: {error}"
+            )
+    return results
+
+
+def run_album_lookup_batch_authenticated(entries, auth_session_id):
+    """Process authenticated lookups while resolving credentials inside the worker."""
+    results = []
+    for entry in entries:
+        try:
+            results.append(
+                run_album_lookup_job_authenticated(
+                    entry["artist"],
+                    entry["title"],
+                    entry["normalized_key"],
+                    auth_session_id,
+                )
+            )
+        except Exception as error:
+            print(
+                "Authenticated Discogs lookup batch item failed for "
+                f"{entry['artist']} - {entry['title']}: {error}"
+            )
+    return results
