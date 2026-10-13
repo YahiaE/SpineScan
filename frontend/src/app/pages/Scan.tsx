@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import {
   X,
   Check,
+  ArrowLeft,
   Camera,
   CameraOff,
   ImagePlus,
@@ -98,6 +99,7 @@ export function Scan() {
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [cameraActive, setCameraActive] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
@@ -140,6 +142,7 @@ export function Scan() {
     setCameraError(null);
     setCaptureError(null);
     setCameraReady(false);
+    setCameraActive(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -156,6 +159,7 @@ export function Scan() {
         await videoRef.current.play().catch(() => undefined);
       }
     } catch {
+      setCameraActive(false);
       setCameraError("Camera access denied or unavailable.");
     }
   };
@@ -164,12 +168,12 @@ export function Scan() {
     await disableTorch();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    setCameraActive(false);
     setTorchSupported(false);
     setTorchEnabled(false);
   };
 
   useEffect(() => {
-    startCamera();
     return () => {
       void stopCamera();
     };
@@ -260,7 +264,7 @@ export function Scan() {
     }
     setCaptureError(null);
     setUploadError(null);
-    startCamera();
+    setCameraActive(false);
   };
 
   const handlePhotoSelection = async (
@@ -384,7 +388,43 @@ export function Scan() {
   return (
     <div className="flex flex-col h-full min-h-0 bg-black relative overflow-hidden">
       {photoInputs}
-      {!preview ? (
+      {!preview && !cameraActive ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+          <h1 className="text-xl font-semibold text-white">Add CD photo</h1>
+          <button
+            onClick={() => nativeCameraInputRef.current?.click()}
+            disabled={preparingPhoto}
+            className="flex w-full max-w-sm items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-4 font-medium text-white transition-colors hover:bg-emerald-500 disabled:opacity-60"
+            type="button"
+          >
+            <Camera className="h-5 w-5" />
+            Take with phone camera
+          </button>
+          <button
+            onClick={() => photoLibraryInputRef.current?.click()}
+            disabled={preparingPhoto}
+            className="flex w-full max-w-sm items-center justify-center gap-2 rounded-xl border border-neutral-700 px-5 py-4 font-medium text-white transition-colors hover:bg-neutral-900 disabled:opacity-60"
+            type="button"
+          >
+            <ImagePlus className="h-5 w-5" />
+            {preparingPhoto ? "Preparing photo..." : "Choose from photos"}
+          </button>
+          <button
+            onClick={() => void startCamera()}
+            disabled={preparingPhoto}
+            className="mt-2 flex items-center justify-center gap-2 px-4 py-3 text-sm text-neutral-300 transition-colors hover:text-white disabled:opacity-60"
+            type="button"
+          >
+            <Camera className="h-4 w-4" />
+            Use in-app camera
+          </button>
+          {(captureError || uploadError) && (
+            <p className="max-w-sm text-sm text-red-400">
+              {captureError ?? uploadError}
+            </p>
+          )}
+        </div>
+      ) : !preview ? (
         <div
           className="flex-1 min-h-0 relative flex flex-col items-center justify-end overflow-hidden"
           style={{
@@ -401,6 +441,15 @@ export function Scan() {
             className="absolute inset-0 w-full h-full object-cover"
           />
           <canvas ref={canvasRef} className="hidden" />
+
+          <button
+            onClick={() => void stopCamera()}
+            className="absolute left-4 top-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-colors hover:bg-black/75"
+            type="button"
+            title="Other photo options"
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </button>
 
           <button
             onClick={handleTorchToggle}
@@ -432,27 +481,6 @@ export function Scan() {
               </>
             )}
           </button>
-
-          <div className="absolute top-16 left-0 right-0 z-10 flex justify-center gap-2 px-3">
-            <button
-              onClick={() => nativeCameraInputRef.current?.click()}
-              disabled={preparingPhoto}
-              className="flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75 disabled:opacity-60"
-              type="button"
-            >
-              <Camera className="h-4 w-4" />
-              Phone camera
-            </button>
-            <button
-              onClick={() => photoLibraryInputRef.current?.click()}
-              disabled={preparingPhoto}
-              className="flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/75 disabled:opacity-60"
-              type="button"
-            >
-              <ImagePlus className="h-4 w-4" />
-              {preparingPhoto ? "Preparing..." : "Choose photo"}
-            </button>
-          </div>
 
           {/* Viewfinder brackets */}
           <div
