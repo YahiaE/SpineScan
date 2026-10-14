@@ -157,12 +157,13 @@ SpineScan is a split React + Flask app with a staged pipeline.
 5. If an identical import is already running, a second request waits briefly for the cached result, then returns `202` if it is still in progress.
 	- The frontend polls `POST /api/discogs/import-status` until the result is cached.
 	- If the status endpoint finds neither a cached result nor an active lock, the frontend may safely resubmit once.
-6. Once inside the import loop, the backend first warms the selected folder's collection-membership cache with `ensure_collection_membership_cache_warm`.
-7. That warm step:
-	- fetches up to `DISCOGS_COLLECTION_WARM_MAX_PAGES` from the Discogs folder
-	- writes release IDs and album keys into Redis sets
-	- persists durable rows into `discogs_collection_cache`
-	- mirrors those rows into the shared `albums` table
+6. Once inside the import loop, the backend asks `ensure_collection_membership_cache_warm` for the selected folder's snapshot.
+7. The cache flow:
+	- reuses a complete Supabase snapshot within `COLLECTION_CACHE_TTL_SECONDS`
+	- otherwise fetches all Discogs pages into a new generation under a per-folder Redis lock
+	- publishes the new generation only after every page is persisted
+	- mirrors the completed snapshot into the shared `albums` table
+	- supports forced refresh through `POST /api/discogs/collection-cache/refresh`
 8. Each candidate import entry then goes through duplicate guards in this order:
 	- resolve missing `release_id` if needed
 	- reject invalid or unresolved entries

@@ -27,8 +27,6 @@ from config import (
     ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS,
     ALBUM_LOOKUP_PENDING_TTL_SECONDS,
     COLLECTION_CACHE_TTL_SECONDS,
-    COLLECTION_CACHE_VERSION,
-    DISCOGS_COLLECTION_WARM_MAX_PAGES,
     DISCOGS_AUTH_REQUEST_LIMIT,
     DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE,
     DISCOGS_LOOKUP_BREAKER_TTL_SECONDS,
@@ -790,7 +788,7 @@ def iter_discogs_paginated_items(
     rate_scope="global",
 ):
     """Iterate a Discogs paginated list while rate-limiting each page fetch."""
-    max_pages = max(1, int(max_pages))
+    max_pages = None if max_pages is None else max(1, int(max_pages))
 
     if max_pages == 1:
         if budget and not budget.consume():
@@ -814,7 +812,8 @@ def iter_discogs_paginated_items(
         rate_scope=rate_scope,
     )
 
-    for page_index in range(1, min(total_pages, max_pages) + 1):
+    page_count = total_pages if max_pages is None else min(total_pages, max_pages)
+    for page_index in range(1, page_count + 1):
         if budget and not budget.consume():
             return
 
@@ -1196,6 +1195,14 @@ def _upsert_albums_from_collection_cache(rows_by_key):
     if not rows_by_key:
         return
 
+    if len(rows_by_key) > 500:
+        rows = list(rows_by_key.items())
+        for offset in range(0, len(rows), 500):
+            _upsert_albums_from_collection_cache(
+                dict(rows[offset : offset + 500])
+            )
+        return
+
     release_ids = []
     for row in rows_by_key.values():
         release_id = row.get("discogs_release_id")
@@ -1281,113 +1288,267 @@ def _upsert_albums_from_collection_cache(rows_by_key):
             print(f"Failed to delete stale albums keys: {error}")
 
 
-def _mirror_albums_from_durable_collection_cache(discogs_username, folder_id):
-    """Hydrate albums table from durable collection cache rows."""
+class CollectionCacheRefreshInProgress(RuntimeError):
+    """Raised when another request is already refreshing this collection folder."""
+
+
+def _get_collection_cache_state(discogs_username, folder_id):
+    response = (
+        supabase.table("discogs_collection_cache_state")
+        .select(
+            "active_generation, is_complete, last_success_at, entry_count, "
+            "pages_fetched, pages_total"
+        )
+        .eq("discogs_username", discogs_username)
+        .eq("folder_id", int(folder_id))
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(response, "data", None) or []
+    return rows[0] if rows else None
+
+
+def _collection_cache_is_fresh(state):
+    if not state or not state.get("is_complete") or not state.get("active_generation"):
+        return False
+
+    last_success_at = state.get("last_success_at")
+    if not last_success_at:
+        return False
+
     try:
-        response = (
+        refreshed_at = datetime.fromisoformat(str(last_success_at).replace("Z", "+00:00"))
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return False
+
+    return (datetime.now(timezone.utc) - refreshed_at).total_seconds() < max(
+        0, COLLECTION_CACHE_TTL_SECONDS
+    )
+
+
+def _load_collection_cache_snapshot(discogs_username, folder_id, state):
+    generation = state.get("active_generation")
+    if not generation or not state.get("is_complete"):
+        return None
+
+    release_ids = set()
+    album_keys = set()
+    last_release_id = None
+    page_size = 1000
+
+    while True:
+        query = (
             supabase.table("discogs_collection_cache")
-            .select("album_key, release_id, last_seen_at")
+            .select("release_id, album_key")
             .eq("discogs_username", discogs_username)
             .eq("folder_id", int(folder_id))
-            .limit(5000)
-            .execute()
+            .eq("snapshot_generation", generation)
+            .order("release_id")
+            .limit(page_size)
         )
-    except Exception as error:
-        print(f"Failed to read durable collection cache for albums mirror: {error}")
-        return
+        if last_release_id is not None:
+            query = query.gt("release_id", last_release_id)
+        response = query.execute()
+        rows = getattr(response, "data", None) or []
+        for row in rows:
+            release_id = row.get("release_id")
+            if release_id is not None:
+                release_ids.add(int(release_id))
+            album_key = str(row.get("album_key") or "").strip()
+            if album_key:
+                album_keys.add(album_key)
 
-    rows = getattr(response, "data", None) or []
-    album_rows_by_key = {}
-    for row in rows:
-        album_key = str(row.get("album_key") or "").strip()
-        release_id = row.get("release_id")
-        if not album_key or "::" not in album_key or release_id is None:
-            continue
+        if len(rows) < page_size:
+            break
+        last_release_id = int(rows[-1]["release_id"])
 
-        artist_key, title_key = album_key.split("::", 1)
-        album_rows_by_key[album_key] = {
-            "artist": artist_key,
-            "album": title_key,
-            "normalized_key": album_key,
-            "discogs_release_id": int(release_id),
-            "updated_at": row.get("last_seen_at") or utc_timestamp(),
-        }
+    return {
+        "release_ids": release_ids,
+        "album_keys": album_keys,
+        "generation": generation,
+        "last_success_at": state.get("last_success_at"),
+        "entry_count": len(release_ids),
+        "pages_fetched": state.get("pages_fetched", 0),
+        "pages_total": state.get("pages_total", 0),
+    }
 
-    _upsert_albums_from_collection_cache(album_rows_by_key)
+
+def _release_collection_refresh_lock(lock_key, lock_token):
+    redis_conn.eval(
+        "if redis.call('get', KEYS[1]) == ARGV[1] then "
+        "return redis.call('del', KEYS[1]) else return 0 end",
+        1,
+        lock_key,
+        lock_token,
+    )
 
 
 def refresh_collection_cache_from_discogs(client, discogs_username, folder):
-    """Refresh Supabase collection cache from current Discogs folder state."""
+    """Build and publish a complete, generation-scoped collection snapshot."""
     folder_id = int(folder.id)
-    durable_rows_by_release = {}
+    generation = secrets.token_hex(16)
+    paginated_releases = folder.releases
+    pages_total = max(
+        0,
+        int(
+            call_discogs(
+                lambda: paginated_releases.pages,
+                authenticated=True,
+            )
+        ),
+    )
     album_rows_by_key = {}
+    seen_release_ids = set()
+    entry_count = 0
+    row_seen_at = utc_timestamp()
 
-    # Fetch fresh collection from Discogs
-    for item in iter_discogs_paginated_items(
-        folder.releases,
-        authenticated=True,
-        max_pages=DISCOGS_COLLECTION_WARM_MAX_PAGES,
-    ):
-        release = getattr(item, "release", None) or item
-        release_id = getattr(release, "id", None)
-        if release_id is None:
-            continue
+    for page_index in range(1, pages_total + 1):
+        page_items = call_discogs(
+            lambda page_index=page_index: paginated_releases.page(page_index),
+            authenticated=True,
+        )
+        rows_by_release = {}
 
-        release_title = getattr(release, "title", "")
-        release_artists = getattr(release, "artists", None) or []
-        release_artist_name = ""
-        if release_artists:
-            release_artist_name = getattr(release_artists[0], "name", "") or ""
+        for item in page_items:
+            release = getattr(item, "release", None) or item
+            release_id = getattr(release, "id", None)
+            if release_id is None:
+                continue
 
-        album_key = album_identity_key(release_artist_name, release_title)
-        serialized_album_key = serialize_album_identity_key(album_key)
-        durable_rows_by_release[int(release_id)] = {
-            "discogs_username": discogs_username,
-            "folder_id": folder_id,
-            "release_id": int(release_id),
-            "album_key": serialized_album_key,
-            "last_seen_at": utc_timestamp(),
-        }
-        album_rows_by_key[serialized_album_key] = {
-            "artist": release_artist_name or album_key[0],
-            "album": release_title or album_key[1],
-            "normalized_key": serialized_album_key,
-            "discogs_release_id": int(release_id),
-            "updated_at": utc_timestamp(),
-        }
+            release_title = getattr(release, "title", "")
+            release_artists = getattr(release, "artists", None) or []
+            release_artist_name = ""
+            if release_artists:
+                release_artist_name = getattr(release_artists[0], "name", "") or ""
 
-    # Persist to Supabase only (no Redis)
-    durable_rows = list(durable_rows_by_release.values())
-    if durable_rows:
-        try:
+            album_key = album_identity_key(release_artist_name, release_title)
+            serialized_album_key = serialize_album_identity_key(album_key)
+            normalized_release_id = int(release_id)
+            if normalized_release_id in seen_release_ids:
+                continue
+            seen_release_ids.add(normalized_release_id)
+            rows_by_release[normalized_release_id] = {
+                "discogs_username": discogs_username,
+                "folder_id": folder_id,
+                "release_id": normalized_release_id,
+                "snapshot_generation": generation,
+                "album_key": serialized_album_key,
+                "last_seen_at": row_seen_at,
+            }
+            album_rows_by_key[serialized_album_key] = {
+                "artist": release_artist_name or album_key[0],
+                "album": release_title or album_key[1],
+                "normalized_key": serialized_album_key,
+                "discogs_release_id": normalized_release_id,
+                "updated_at": row_seen_at,
+            }
+
+        page_rows = list(rows_by_release.values())
+        entry_count += len(page_rows)
+        for offset in range(0, len(page_rows), 500):
             (
                 supabase.table("discogs_collection_cache")
                 .upsert(
-                    durable_rows,
-                    on_conflict="discogs_username,folder_id,release_id",
+                    page_rows[offset : offset + 500],
+                    on_conflict=(
+                        "discogs_username,folder_id,snapshot_generation,release_id"
+                    ),
                 )
                 .execute()
             )
-        except Exception as error:
-            print(f"Failed to refresh collection cache: {error}")
 
-    # Mirror to albums lookup table
-    _upsert_albums_from_collection_cache(album_rows_by_key)
-    return set(durable_rows_by_release), set(album_rows_by_key)
+    # Publish only after every Discogs page has been fetched and persisted.
+    refreshed_at = utc_timestamp()
+    state = {
+        "discogs_username": discogs_username,
+        "folder_id": folder_id,
+        "active_generation": generation,
+        "is_complete": True,
+        "last_success_at": refreshed_at,
+        "entry_count": entry_count,
+        "pages_fetched": pages_total,
+        "pages_total": pages_total,
+        "updated_at": refreshed_at,
+    }
+    (
+        supabase.table("discogs_collection_cache_state")
+        .upsert(state, on_conflict="discogs_username,folder_id")
+        .execute()
+    )
 
-
-def ensure_collection_membership_cache_warm(client, discogs_username, folder):
-    """Refresh collection cache from Discogs for the selected folder.
-
-    This updates Supabase with the latest collection state when the user
-    selects a folder for import, ensuring duplicate checks are always current.
-    """
     try:
-        return refresh_collection_cache_from_discogs(client, discogs_username, folder)
+        (
+            supabase.table("discogs_collection_cache")
+            .delete()
+            .eq("discogs_username", discogs_username)
+            .eq("folder_id", folder_id)
+            .neq("snapshot_generation", generation)
+            .execute()
+        )
     except Exception as error:
-        # Non-fatal: duplicate detection falls back to API response
+        print(f"Failed to remove old collection snapshot rows: {error}")
+
+    _upsert_albums_from_collection_cache(album_rows_by_key)
+    return _load_collection_cache_snapshot(discogs_username, folder_id, state)
+
+
+def ensure_collection_membership_cache_warm(
+    client,
+    discogs_username,
+    folder,
+    force_refresh=False,
+    raise_on_error=False,
+):
+    """Reuse a fresh complete snapshot or refresh the selected folder once."""
+    folder_id = int(folder.id)
+    lock_key = f"discogs:collection-cache:refresh:{discogs_username}:{folder_id}"
+    lock_token = secrets.token_urlsafe(20)
+    acquired_lock = False
+
+    try:
+        state = _get_collection_cache_state(discogs_username, folder_id)
+        if not force_refresh and _collection_cache_is_fresh(state):
+            return _load_collection_cache_snapshot(
+                discogs_username,
+                folder_id,
+                state,
+            )
+
+        acquired_lock = bool(
+            redis_conn.set(lock_key, lock_token, nx=True, ex=1800)
+        )
+        if not acquired_lock:
+            raise CollectionCacheRefreshInProgress(
+                "Collection refresh is already in progress. Try again shortly."
+            )
+
+        # Another request may have completed a refresh between the first read and lock.
+        state = _get_collection_cache_state(discogs_username, folder_id)
+        if not force_refresh and _collection_cache_is_fresh(state):
+            return _load_collection_cache_snapshot(
+                discogs_username,
+                folder_id,
+                state,
+            )
+
+        return refresh_collection_cache_from_discogs(
+            client,
+            discogs_username,
+            folder,
+        )
+    except Exception as error:
+        if raise_on_error:
+            raise
         print(f"Collection cache refresh failed: {error}")
         return None
+    finally:
+        if acquired_lock:
+            try:
+                _release_collection_refresh_lock(lock_key, lock_token)
+            except Exception as error:
+                print(f"Failed to release collection refresh lock: {error}")
 
 
 def sync_collection_membership_cache(
@@ -1395,6 +1556,7 @@ def sync_collection_membership_cache(
     folder_id,
     entries_to_cache,
     entries_to_mirror,
+    snapshot_generation=None,
 ):
     """Batch collection membership writes and their album-table mirrors."""
     if not entries_to_cache and not entries_to_mirror:
@@ -1410,12 +1572,13 @@ def sync_collection_membership_cache(
     ]
     timestamp = utc_timestamp()
 
-    if normalized_cache_entries:
+    if normalized_cache_entries and snapshot_generation:
         collection_rows = [
             {
                 "discogs_username": discogs_username,
                 "folder_id": int(folder_id),
                 "release_id": release_id,
+                "snapshot_generation": snapshot_generation,
                 "album_key": serialize_album_identity_key(album_key),
                 "last_seen_at": timestamp,
             }
@@ -1426,7 +1589,9 @@ def sync_collection_membership_cache(
                 supabase.table("discogs_collection_cache")
                 .upsert(
                     collection_rows,
-                    on_conflict="discogs_username,folder_id,release_id",
+                    on_conflict=(
+                        "discogs_username,folder_id,snapshot_generation,release_id"
+                    ),
                 )
                 .execute()
             )
@@ -1456,35 +1621,20 @@ def load_collection_cache_membership(discogs_username, folder_id):
     normalized_folder_id = int(folder_id)
 
     try:
-        response = (
-            supabase.table("discogs_collection_cache")
-            .select("release_id, album_key")
-            .eq("discogs_username", discogs_username)
-            .eq("folder_id", normalized_folder_id)
-            .limit(5000)
-            .execute()
+        state = _get_collection_cache_state(discogs_username, normalized_folder_id)
+        if not state or not state.get("is_complete"):
+            return set(), set()
+        snapshot = _load_collection_cache_snapshot(
+            discogs_username,
+            normalized_folder_id,
+            state,
         )
-        rows = getattr(response, "data", None) or []
+        if snapshot is None:
+            return set(), set()
+        return snapshot["release_ids"], snapshot["album_keys"]
     except Exception as error:
         print(f"Failed to load collection cache membership: {error}")
         return set(), set()
-
-    release_ids = set()
-    album_keys = set()
-    for row in rows:
-        release_id = row.get("release_id")
-        album_key = str(row.get("album_key") or "").strip()
-
-        if release_id is not None:
-            try:
-                release_ids.add(int(release_id))
-            except (TypeError, ValueError):
-                pass
-
-        if album_key:
-            album_keys.add(album_key)
-
-    return release_ids, album_keys
 
 
 def is_release_in_collection_cache(discogs_username, folder_id, release_id):

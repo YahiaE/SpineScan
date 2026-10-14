@@ -59,29 +59,30 @@ python worker.py
 
 ## Collection membership cache flow
 
-Before importing albums, the backend refreshes the collection cache from Discogs:
+The backend keeps generation-scoped membership snapshots in Supabase, keyed by
+Discogs user and folder. Imports reuse the active snapshot while it is complete
+and younger than `COLLECTION_CACHE_TTL_SECONDS` (default: 30 minutes).
 
-1. **User selects import folder**
-   - Backend calls `refresh_collection_cache_from_discogs()` to fetch latest Discogs state
-   - Releases and album keys are persisted directly to Supabase `discogs_collection_cache` table
-   - Albums are mirrored to `albums` lookup table for fast duplicate detection
+When the snapshot is missing or stale, the backend fetches every Discogs page
+under a per-folder Redis lock. It writes rows under a new generation and only
+publishes that generation after all pages and rows have been persisted. An
+interrupted refresh therefore leaves the prior complete snapshot active. The
+`POST /api/discogs/collection-cache/refresh` endpoint forces a refresh, and the
+Review screen exposes it as **Refresh collection**.
 
-2. **Import duplicate checks** (via Supabase only, no Redis involved)
-   - `is_release_in_collection_cache()` queries Supabase for release ID membership
-   - `is_album_in_collection_cache()` queries Supabase for album key membership
-   - When duplicate detected, entry is skipped with "already exists" message
+Collection rows include `snapshot_generation`; sync metadata is stored in
+`discogs_collection_cache_state`. Apply
+[`backend/sql/discogs_collection_cache.sql`](sql/discogs_collection_cache.sql)
+before deploying this change. Reads use Supabase range pagination rather than
+a fixed row cap. Successful imports update the active generation and mirror
+album identities into the shared `albums` table.
 
-3. **After successful add or duplicate detection**
-   - `cache_collection_membership_entry()` updates Supabase immediately
-   - Albums lookup table is also updated for consistency
-   - No Redis caching layer
+If a refresh fails or another refresh already holds the folder lock, import
+duplicate detection falls back to Discogs' add response, including its duplicate
+error handling.
 
-**Benefits of Supabase-only design:**
-- **Accuracy**: Collection state is always current across sessions and instances
-- **Memory efficient**: Redis is freed from collection membership sets
-- **Consistency**: Single source of truth (Supabase), no marker tracking
-- **Scalability**: Can be queried from multiple workers without coordination
-- **Durability**: Collection membership persists indefinitely, not subject to TTL
+Set `COLLECTION_CACHE_TTL_SECONDS` in the backend environment to tune the
+freshness window. Manual refresh always bypasses the TTL.
 
 ## Discogs lookup tuning
 

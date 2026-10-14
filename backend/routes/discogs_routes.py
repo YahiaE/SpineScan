@@ -18,6 +18,7 @@ from services.discogs_service import (
     add_release_to_folder,
     album_identity_key,
     build_import_request_fingerprint,
+    CollectionCacheRefreshInProgress,
     enqueue_album_lookup_batch,
     ensure_collection_membership_cache_warm,
     get_collection_folder,
@@ -127,6 +128,62 @@ def get_collection_folders():
         )
 
     return jsonify({"folders": folders})
+
+
+@discogs_bp.route("/collection-cache/refresh", methods=["POST"])
+def refresh_collection_cache():
+    body = request.get_json(silent=True) or {}
+    folder_id = body.get("folder_id")
+    if folder_id is None:
+        return jsonify({"error": "Missing 'folder_id' in request body"}), 400
+
+    try:
+        folder_id = int(folder_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "'folder_id' must be an integer"}), 400
+
+    if not _consume_user_rate_slot("collection-refresh", 2):
+        return jsonify({"error": "Collection refresh rate limit exceeded."}), 429
+
+    try:
+        client = get_discogs_client()
+        user = get_discogs_identity(client)
+        folders = get_discogs_collection_folders(user)
+    except ValueError:
+        return jsonify({"error": "User not authenticated"}), 401
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+    folder = get_collection_folder(folders, folder_id)
+    if folder is None:
+        return jsonify({"error": "Selected collection folder is not available"}), 404
+
+    try:
+        snapshot = ensure_collection_membership_cache_warm(
+            client,
+            user.username,
+            folder,
+            force_refresh=True,
+            raise_on_error=True,
+        )
+    except CollectionCacheRefreshInProgress as error:
+        return jsonify({"error": str(error)}), 409
+    except Exception as error:
+        return jsonify({"error": f"Collection refresh failed: {error}"}), 502
+
+    if snapshot is None:
+        return jsonify({"error": "Collection refresh did not produce a complete snapshot"}), 502
+
+    return jsonify(
+        {
+            "refreshed": True,
+            "folder_id": folder_id,
+            "entry_count": snapshot["entry_count"],
+            "pages_fetched": snapshot["pages_fetched"],
+            "pages_total": snapshot["pages_total"],
+            "last_success_at": snapshot["last_success_at"],
+        }
+    )
 
 
 @discogs_bp.route("/worker-status", methods=["GET"])
@@ -465,7 +522,16 @@ def import_entries():
         results = []
         collection_entries_to_cache = {}
         album_entries_to_mirror = []
-        cached_release_ids, cached_album_keys = collection_membership or (set(), set())
+        cached_release_ids = (
+            collection_membership.get("release_ids", set())
+            if collection_membership
+            else set()
+        )
+        cached_album_keys = (
+            collection_membership.get("album_keys", set())
+            if collection_membership
+            else set()
+        )
 
         for entry in entries:
             entry_id = entry.get("id")
@@ -661,6 +727,11 @@ def import_entries():
             folder_id,
             collection_entries_to_cache,
             album_entries_to_mirror,
+            snapshot_generation=(
+                collection_membership.get("generation")
+                if collection_membership
+                else None
+            ),
         )
 
         added_count = sum(1 for result in results if result["status"] == "added")

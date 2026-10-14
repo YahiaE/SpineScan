@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   ShieldAlert,
   Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { apiFetch } from "../apiClient";
@@ -46,6 +47,11 @@ export function Review() {
   const [editArtist, setEditArtist] = useState("");
   const [editTitle, setEditTitle] = useState("");
   const [loadingFolders, setLoadingFolders] = useState(false);
+  const [refreshingCollection, setRefreshingCollection] = useState(false);
+  const [collectionRefreshMessage, setCollectionRefreshMessage] = useState<{
+    text: string;
+    error: boolean;
+  } | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [validating, setValidating] = useState(false);
@@ -138,6 +144,40 @@ export function Review() {
       if (!isBackground) {
         setValidating(false);
       }
+    }
+  };
+
+  const handleRefreshCollection = async () => {
+    if (selectedCollectionId === null) return;
+
+    setRefreshingCollection(true);
+    setCollectionRefreshMessage(null);
+    try {
+      const response = await apiFetch(
+        `${API_BASE}/discogs/collection-cache/refresh`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folder_id: selectedCollectionId }),
+        },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Could not refresh collection");
+      }
+
+      setCollectionRefreshMessage({
+        text: `Refreshed ${payload.entry_count} releases from Discogs.`,
+        error: false,
+      });
+    } catch (error) {
+      setCollectionRefreshMessage({
+        text:
+          error instanceof Error ? error.message : "Could not refresh collection",
+        error: true,
+      });
+    } finally {
+      setRefreshingCollection(false);
     }
   };
 
@@ -409,20 +449,46 @@ export function Review() {
             <p className="text-sm text-neutral-400 mb-2">
               Target Discogs collection
             </p>
-            <select
-              value={selectedCollectionId ?? ""}
-              onChange={(event) =>
-                setSelectedCollectionId(Number(event.target.value))
-              }
-              disabled={loadingFolders || collectionFolders.length === 0}
-              className="w-full bg-neutral-950 text-white px-3 py-3 rounded-lg border border-neutral-700 focus:outline-none focus:border-emerald-500"
-            >
-              {collectionFolders.map((folder) => (
-                <option key={folder.id} value={folder.id}>
-                  {folder.name}
-                </option>
-              ))}
-            </select>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <select
+                value={selectedCollectionId ?? ""}
+                onChange={(event) => {
+                  setSelectedCollectionId(Number(event.target.value));
+                  setCollectionRefreshMessage(null);
+                }}
+                disabled={loadingFolders || collectionFolders.length === 0}
+                className="min-w-0 flex-1 bg-neutral-950 text-white px-3 py-3 rounded-lg border border-neutral-700 focus:outline-none focus:border-emerald-500"
+              >
+                {collectionFolders.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => void handleRefreshCollection()}
+                disabled={
+                  loadingFolders ||
+                  refreshingCollection ||
+                  selectedCollectionId === null
+                }
+                className="flex shrink-0 items-center justify-center gap-2 rounded-lg border border-neutral-700 px-4 py-3 text-sm font-medium text-neutral-200 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                type="button"
+              >
+                <RefreshCw
+                  className={`h-4 w-4 ${refreshingCollection ? "animate-spin" : ""}`}
+                />
+                {refreshingCollection ? "Refreshing..." : "Refresh collection"}
+              </button>
+            </div>
+            {collectionRefreshMessage && (
+              <p
+                className={`mt-2 text-sm ${collectionRefreshMessage.error ? "text-red-400" : "text-emerald-400"}`}
+                role="status"
+              >
+                {collectionRefreshMessage.text}
+              </p>
+            )}
             {folderError && (
               <p className="text-red-400 text-sm mt-2">{folderError}</p>
             )}
