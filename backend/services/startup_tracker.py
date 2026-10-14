@@ -12,8 +12,7 @@ logger = logging.getLogger(__name__)
 
 _startup_state_lock = Lock()
 _app_startup_time = None
-_is_warm = False
-_warm_threshold_seconds = 30  # If scheduler has pinged us recently, we're "warm"
+_warm_threshold_seconds = 30
 
 
 def initialize_startup_tracker():
@@ -23,16 +22,6 @@ def initialize_startup_tracker():
     with _startup_state_lock:
         _app_startup_time = time.time()
         logger.info("Startup tracker initialized")
-
-
-def mark_warm():
-    """Mark the application as 'warm' (scheduler has successfully pinged us)."""
-    global _is_warm
-
-    with _startup_state_lock:
-        _is_warm = True
-        elapsed = time.time() - _app_startup_time
-        logger.info(f"Application marked as warm after {elapsed:.2f} seconds")
 
 
 def is_cold_start(request_time_seconds):
@@ -49,12 +38,9 @@ def is_cold_start(request_time_seconds):
     Returns:
         bool: True if likely cold-start, False otherwise
     """
-    global _app_startup_time, _is_warm
+    global _app_startup_time
 
     with _startup_state_lock:
-        if _is_warm:
-            return False  # Scheduler has warmed us up
-
         if _app_startup_time is None:
             return True  # Startup not tracked yet (shouldn't happen)
 
@@ -81,9 +67,4 @@ def get_startup_elapsed_seconds():
         return time.time() - _app_startup_time
 
 
-def is_application_warm():
-    """Check if the application has been marked as warm."""
-    global _is_warm
 
-    with _startup_state_lock:
-        return _is_warm
