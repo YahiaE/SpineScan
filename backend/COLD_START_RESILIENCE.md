@@ -97,12 +97,10 @@ GET /process/image/xyz -> { status: "completed", albums: [...] } (ready)
 
 # CONFIGURATION
 
-Environment variables (in your .env or Render dashboard):
+Environment variables (in your .env or deployment settings):
 
 Variable                           | Default  | Purpose
 ---------------------------------- | -------- | --------------------------------------------------
-HEALTH_CHECK_INTERVAL_MINUTES     | 13       | How often scheduler pings /healthz
-APP_URL                           | (auto)   | Base URL for health checks
 DISCOGS_SYNC_LOOKUP_TIMEOUT_SECONDS | 30      | Timeout for album lookups
 
 

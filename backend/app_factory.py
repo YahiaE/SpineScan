@@ -20,7 +20,6 @@ from routes.data_routes import data_bp
 from routes.discogs_routes import discogs_bp
 from routes.ops_routes import ops_bp
 from services.monitoring_service import record_http_request
-from services.scheduler_service import init_scheduler, stop_scheduler
 from services.startup_tracker import initialize_startup_tracker, is_cold_start
 
 
@@ -139,18 +138,5 @@ def create_app():
     app.register_blueprint(data_bp)
     app.register_blueprint(discogs_bp)
     app.register_blueprint(ops_bp)
-
-    # Initialize scheduler for periodic health checks (to prevent Render free-tier spindown)
-    try:
-        init_scheduler(app)
-
-        # Register shutdown hook to gracefully stop scheduler
-        @app.teardown_appcontext
-        def shutdown_scheduler(_exception=None):
-            stop_scheduler()
-    except Exception as error:
-        logger.warning(
-            f"Failed to initialize scheduler: {error}. App will still run without periodic health checks."
-        )
 
     return app
