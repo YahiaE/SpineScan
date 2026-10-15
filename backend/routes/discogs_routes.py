@@ -26,6 +26,7 @@ from services.discogs_service import (
     get_discogs_client,
     get_discogs_collection_folders,
     get_discogs_identity,
+    get_discogs_release_options,
     get_lookup_statuses,
     get_lookup_queue_stats,
     build_lookup_request_context,
@@ -299,6 +300,30 @@ def validate_entries():
             print(f"Failed to enqueue Discogs lookup batch: {error}")
 
     return jsonify({"validations": validations})
+
+
+@discogs_bp.route("/release-options", methods=["GET"])
+def release_options():
+    artist = str(request.args.get("artist", "")).strip()
+    title = str(request.args.get("title", "")).strip()
+    if not artist or not title:
+        return jsonify({"error": "Artist and title are required"}), 400
+    if len(artist) > 200 or len(title) > 200:
+        return jsonify({"error": "Artist and title must be 200 characters or fewer"}), 400
+    if not _consume_user_rate_slot("release-options", 8):
+        return jsonify({"error": "Edition search rate limit exceeded."}), 429
+
+    try:
+        client = get_discogs_client()
+    except ValueError:
+        return jsonify({"error": "User not authenticated"}), 401
+
+    try:
+        options = get_discogs_release_options(client, artist, title)
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+    return jsonify({"options": options})
 
 
 @discogs_bp.route("/validation-status", methods=["POST"])

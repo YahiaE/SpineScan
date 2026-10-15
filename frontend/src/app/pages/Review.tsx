@@ -32,6 +32,19 @@ type ValidationResponse = {
   retry_ids?: string[];
 };
 
+type ReleaseOption = {
+  release_id: number;
+  matched_artist: string;
+  matched_title: string;
+  year: number | null;
+  country: string | null;
+  formats: string[];
+  labels: string[];
+  catno: string | null;
+  is_standard_album: boolean;
+  is_special_edition: boolean;
+};
+
 export function Review() {
   const navigate = useNavigate();
   const {
@@ -52,6 +65,14 @@ export function Review() {
     text: string;
     error: boolean;
   } | null>(null);
+  const [editionOptionsById, setEditionOptionsById] = useState<
+    Record<string, ReleaseOption[]>
+  >({});
+  const [openEditionId, setOpenEditionId] = useState<string | null>(null);
+  const [loadingEditionId, setLoadingEditionId] = useState<string | null>(null);
+  const [editionErrorById, setEditionErrorById] = useState<
+    Record<string, string>
+  >({});
   const [folderError, setFolderError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [validating, setValidating] = useState(false);
@@ -179,6 +200,70 @@ export function Review() {
     } finally {
       setRefreshingCollection(false);
     }
+  };
+
+  const toggleEditionOptions = async (album: (typeof scannedAlbums)[number]) => {
+    if (openEditionId === album.id) {
+      setOpenEditionId(null);
+      return;
+    }
+
+    setOpenEditionId(album.id);
+    if (editionOptionsById[album.id]) return;
+
+    setLoadingEditionId(album.id);
+    setEditionErrorById((current) => ({ ...current, [album.id]: "" }));
+    try {
+      const query = new URLSearchParams({
+        artist: album.artist,
+        title: album.title,
+      });
+      const response = await apiFetch(
+        `${API_BASE}/discogs/release-options?${query.toString()}`,
+        {},
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Could not load CD editions");
+      }
+      setEditionOptionsById((current) => ({
+        ...current,
+        [album.id]: payload.options ?? [],
+      }));
+    } catch (error) {
+      setEditionErrorById((current) => ({
+        ...current,
+        [album.id]:
+          error instanceof Error ? error.message : "Could not load CD editions",
+      }));
+    } finally {
+      setLoadingEditionId(null);
+    }
+  };
+
+  const selectEdition = (albumId: string, releaseId: number) => {
+    const option = editionOptionsById[albumId]?.find(
+      (candidate) => candidate.release_id === releaseId,
+    );
+    if (!option) return;
+
+    setScannedAlbums(
+      scannedAlbums.map((album) =>
+        album.id === albumId
+          ? {
+              ...album,
+              validation: {
+                ...album.validation,
+                status: "valid",
+                releaseId: option.release_id,
+                matchedArtist: option.matched_artist,
+                matchedTitle: option.matched_title,
+                message: "User-selected Discogs edition",
+              },
+            }
+          : album,
+      ),
+    );
   };
 
   useEffect(() => {
@@ -573,6 +658,86 @@ export function Review() {
                     <p className="text-xs text-neutral-500">
                       {validationMessage}
                     </p>
+                    {validationStatus === "valid" &&
+                      album.validation?.releaseId && (
+                        <div className="space-y-2">
+                          <button
+                            onClick={() => void toggleEditionOptions(album)}
+                            disabled={loadingEditionId === album.id}
+                            className="min-h-9 touch-manipulation text-left text-xs font-medium text-emerald-300 underline decoration-emerald-500/40 underline-offset-2 disabled:opacity-60"
+                            type="button"
+                          >
+                            {loadingEditionId === album.id
+                              ? "Loading editions..."
+                              : openEditionId === album.id
+                                ? "Hide other editions"
+                                : "Change CD edition"}
+                          </button>
+                          {openEditionId === album.id &&
+                            loadingEditionId !== album.id && (
+                              <div className="space-y-1.5">
+                                {editionOptionsById[album.id] === undefined ? null :
+                                  editionOptionsById[album.id].length > 0 ? (
+                                  <select
+                                    aria-label={`Discogs CD edition for ${album.title}`}
+                                    value={album.validation.releaseId}
+                                    onChange={(event) =>
+                                      selectEdition(
+                                        album.id,
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                    className="min-h-11 w-full rounded-lg border border-neutral-700 bg-neutral-950 px-3 text-base text-white focus:border-emerald-500 focus:outline-none sm:text-sm"
+                                  >
+                                    <option value={album.validation.releaseId}>
+                                      Current selection: {album.validation.matchedTitle ?? album.title}
+                                    </option>
+                                    {editionOptionsById[album.id]
+                                      .filter(
+                                        (option) =>
+                                          option.release_id !==
+                                          album.validation?.releaseId,
+                                      )
+                                      .map((option) => {
+                                        const category = option.is_standard_album
+                                          ? "Standard album"
+                                          : option.is_special_edition
+                                            ? "Special edition"
+                                            : "Other CD";
+                                        const details = [
+                                          option.year,
+                                          option.country,
+                                          option.formats.join(", "),
+                                          option.catno,
+                                        ]
+                                          .filter(Boolean)
+                                          .join(" · ");
+
+                                        return (
+                                          <option
+                                            key={option.release_id}
+                                            value={option.release_id}
+                                          >
+                                            {category}: {option.matchedTitle}
+                                            {details ? ` · ${details}` : ""}
+                                          </option>
+                                        );
+                                      })}
+                                  </select>
+                                  ) : (
+                                  <p className="text-xs text-neutral-400">
+                                    No alternate CD editions found.
+                                  </p>
+                                  )}
+                                {editionErrorById[album.id] && (
+                                  <p className="text-xs text-red-400" role="alert">
+                                    {editionErrorById[album.id]}
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                        </div>
+                      )}
                   </div>
                 )}
 

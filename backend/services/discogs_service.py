@@ -998,6 +998,69 @@ def is_cd_release_result(result):
     return any("cd" in value for value in normalized_formats)
 
 
+def get_release_edition_metadata(result):
+    data = getattr(result, "data", None)
+    data = data if isinstance(data, dict) else {}
+
+    raw_formats = data.get("format") or getattr(result, "formats", None) or []
+    if isinstance(raw_formats, str):
+        raw_formats = [raw_formats]
+    formats = [str(value).strip() for value in raw_formats if value]
+
+    raw_labels = data.get("label") or []
+    if isinstance(raw_labels, str):
+        raw_labels = [raw_labels]
+    labels = [str(value).strip() for value in raw_labels if value]
+
+    raw_catno = data.get("catno") or data.get("catalog_number") or ""
+    if isinstance(raw_catno, (list, tuple)):
+        raw_catno = ", ".join(str(value) for value in raw_catno if value)
+
+    try:
+        year = int(data["year"]) if data.get("year") else None
+    except (TypeError, ValueError):
+        year = None
+
+    normalized_formats = {normalize_text(value) for value in formats}
+    is_single_or_ep = any(
+        value in normalized_formats for value in ("single", "ep", "mini album")
+    )
+    is_compilation = "compilation" in normalized_formats or "box set" in normalized_formats
+    has_album_format = "album" in normalized_formats
+    special_markers = (
+        "deluxe",
+        "limited edition",
+        "anniversary",
+        "remaster",
+        "reissue",
+        "special edition",
+        "expanded",
+        "bonus track",
+        "club edition",
+        "promo",
+    )
+    edition_text = normalize_text(
+        " ".join([str(data.get("title") or ""), *formats])
+    )
+    is_special_edition = any(marker in edition_text for marker in special_markers)
+    is_standard_album = (
+        has_album_format
+        and not is_single_or_ep
+        and not is_compilation
+        and not is_special_edition
+    )
+
+    return {
+        "year": year,
+        "country": str(data.get("country") or "").strip() or None,
+        "formats": formats,
+        "labels": labels,
+        "catno": str(raw_catno).strip() or None,
+        "is_standard_album": is_standard_album,
+        "is_special_edition": is_special_edition,
+    }
+
+
 def iter_release_candidates(
     client,
     artist,
@@ -1077,7 +1140,7 @@ def find_best_release_match(
     rate_scope="global",
 ):
     """Find the best matching Discogs release for a scanned album entry."""
-    best_match = None
+    candidates = []
     budget = LookupBudget(DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM)
 
     for result in iter_release_candidates(
@@ -1090,25 +1153,51 @@ def find_best_release_match(
     ):
         matched_artist, matched_title = parse_release_result(result)
         scores = score_candidate(artist, title, matched_artist, matched_title)
-
-        if (
-            best_match is None
-            or scores["combined_score"] > best_match["combined_score"]
-        ):
-            best_match = {
+        metadata = get_release_edition_metadata(result)
+        candidates.append(
+            {
                 "release_id": getattr(result, "id", None),
                 "matched_artist": matched_artist,
                 "matched_title": matched_title,
+                **metadata,
                 **scores,
             }
+        )
 
-            should_accept_early = (
-                best_match["exact_title"]
-                and best_match["artist_score"] >= 0.65
-                and best_match["combined_score"] >= DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE
+        should_accept_early = (
+            metadata["is_standard_album"]
+            and scores["exact_title"]
+            and scores["artist_score"] >= 0.65
+            and scores["combined_score"] >= DISCOGS_LOOKUP_EARLY_ACCEPT_SCORE
+        )
+        if should_accept_early:
+            break
+
+    best_match = None
+    if candidates:
+        highest_score = max(candidate["combined_score"] for candidate in candidates)
+        comparable_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate["combined_score"] >= highest_score - 0.12
+        ]
+        standard_albums = [
+            candidate
+            for candidate in comparable_candidates
+            if candidate["is_standard_album"]
+        ]
+
+        if standard_albums:
+            best_match = min(
+                standard_albums,
+                key=lambda candidate: (
+                    candidate["year"] is None,
+                    candidate["year"] or 9999,
+                    -candidate["combined_score"],
+                ),
             )
-            if should_accept_early:
-                break
+        else:
+            best_match = max(candidates, key=lambda item: item["combined_score"])
 
     if not best_match:
         return {
@@ -1139,6 +1228,53 @@ def find_best_release_match(
         ),
         **best_match,
     }
+
+
+def get_discogs_release_options(
+    client,
+    artist,
+    title,
+    authenticated=True,
+    rate_scope="global",
+    max_options=10,
+):
+    """Return plausible CD editions for an explicit user choice."""
+    candidates = []
+    budget = LookupBudget(DISCOGS_LOOKUP_MAX_CALLS_PER_ALBUM)
+    for result in iter_release_candidates(
+        client,
+        artist,
+        title,
+        authenticated=authenticated,
+        budget=budget,
+        rate_scope=rate_scope,
+    ):
+        matched_artist, matched_title = parse_release_result(result)
+        scores = score_candidate(artist, title, matched_artist, matched_title)
+        if scores["artist_score"] < 0.35 or scores["title_score"] < 0.45:
+            continue
+
+        metadata = get_release_edition_metadata(result)
+        candidates.append(
+            {
+                "release_id": getattr(result, "id", None),
+                "matched_artist": matched_artist,
+                "matched_title": matched_title,
+                **metadata,
+                **scores,
+            }
+        )
+
+    candidates.sort(
+        key=lambda candidate: (
+            not candidate["is_standard_album"],
+            candidate["is_special_edition"],
+            candidate["year"] is None,
+            candidate["year"] or 9999,
+            -candidate["combined_score"],
+        )
+    )
+    return candidates[: max(1, int(max_options))]
 
 
 def add_release_to_folder(client, username, folder_id, release_id):
