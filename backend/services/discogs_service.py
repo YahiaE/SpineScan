@@ -931,6 +931,10 @@ def parse_release_result(result):
     return raw_artist.strip(), raw_title.strip()
 
 
+def is_various_artist_name(artist):
+    return normalize_text(artist) in {"various", "various artists"}
+
+
 def score_candidate(artist, title, matched_artist, matched_title):
     """Score a Discogs candidate against OCR-extracted artist and title."""
     artist_primary = primary_artist_name(artist)
@@ -1071,23 +1075,41 @@ def iter_release_candidates(
 ):
     """Yield unique Discogs release candidates from multiple query strategies."""
     primary_artist = primary_artist_name(artist)
-    queries = [
-        {
-            "type": "release",
-            "artist": artist,
-            "release_title": title,
-            "format": "CD",
-        },
-        {
-            "type": "release",
-            "artist": primary_artist,
-            "release_title": title,
-            "format": "CD",
-        },
-        {"type": "release", "q": f"{artist} {title}", "format": "CD"},
-        {"type": "release", "q": f"{primary_artist} {title}", "format": "CD"},
-        {"type": "release", "q": title, "artist": artist, "format": "CD"},
-    ][: max(1, DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES)]
+    if artist.strip():
+        queries = [
+            {
+                "type": "release",
+                "artist": artist,
+                "release_title": title,
+                "format": "CD",
+            },
+            {
+                "type": "release",
+                "artist": primary_artist,
+                "release_title": title,
+                "format": "CD",
+            },
+            {"type": "release", "q": f"{artist} {title}", "format": "CD"},
+            {"type": "release", "q": f"{primary_artist} {title}", "format": "CD"},
+            {"type": "release", "q": title, "artist": artist, "format": "CD"},
+        ]
+    else:
+        queries = [
+            {
+                "type": "release",
+                "artist": "Various",
+                "release_title": title,
+                "format": "CD",
+            },
+            {
+                "type": "release",
+                "artist": "Various Artists",
+                "release_title": title,
+                "format": "CD",
+            },
+            {"type": "release", "release_title": title, "format": "CD"},
+        ]
+    queries = queries[: max(1, DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES)]
 
     seen_release_ids = set()
     last_search_error = None
@@ -1125,6 +1147,11 @@ def iter_release_candidates(
             if not is_cd_release_result(result):
                 continue
 
+            if not artist.strip():
+                matched_artist, _ = parse_release_result(result)
+                if not is_various_artist_name(matched_artist):
+                    continue
+
             seen_release_ids.add(release_id)
             yield result
 
@@ -1152,7 +1179,12 @@ def find_best_release_match(
         rate_scope=rate_scope,
     ):
         matched_artist, matched_title = parse_release_result(result)
-        scores = score_candidate(artist, title, matched_artist, matched_title)
+        scores = score_candidate(
+            matched_artist if not artist.strip() else artist,
+            title,
+            matched_artist,
+            matched_title,
+        )
         metadata = get_release_edition_metadata(result)
         candidates.append(
             {
@@ -1250,7 +1282,12 @@ def get_discogs_release_options(
         rate_scope=rate_scope,
     ):
         matched_artist, matched_title = parse_release_result(result)
-        scores = score_candidate(artist, title, matched_artist, matched_title)
+        scores = score_candidate(
+            matched_artist if not artist.strip() else artist,
+            title,
+            matched_artist,
+            matched_title,
+        )
         if scores["artist_score"] < 0.35 or scores["title_score"] < 0.45:
             continue
 
@@ -1901,7 +1938,7 @@ def album_lookup_pending_key(normalized_key):
 
 
 def album_lookup_result_key(normalized_key):
-    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:result:v3:{normalized_key}"
+    return f"discogs:lookup:{ALBUM_LOOKUP_CACHE_VERSION}:album:result:v4:{normalized_key}"
 
 
 def pending_lookup_index_key():
@@ -2019,7 +2056,7 @@ def prefetch_release_lookup_states(entries):
         {
             album_lookup_normalized_key(entry["artist"], entry["title"])
             for entry in entries
-            if entry.get("artist") and entry.get("title")
+            if entry.get("title")
         }
     )
     if not normalized_keys:
@@ -2183,9 +2220,9 @@ def persist_lookup_result(normalized_key, requested_artist, requested_title, mat
             {
                 "status": "invalid",
                 "message": match.get("message") or "No Discogs release match found",
-                "release_id": None,
-                "matched_artist": None,
-                "matched_title": None,
+                "release_id": match.get("release_id"),
+                "matched_artist": match.get("matched_artist"),
+                "matched_title": match.get("matched_title"),
             },
             ttl_seconds=ALBUM_LOOKUP_INVALID_CACHE_TTL_SECONDS,
         )

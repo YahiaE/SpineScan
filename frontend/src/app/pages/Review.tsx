@@ -10,6 +10,7 @@ import {
   ShieldAlert,
   Loader2,
   RefreshCw,
+  X,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { apiFetch } from "../apiClient";
@@ -57,6 +58,7 @@ export function Review() {
     skippedLines,
   } = useAppContext();
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [newUnsavedId, setNewUnsavedId] = useState<string | null>(null);
   const [editArtist, setEditArtist] = useState("");
   const [editTitle, setEditTitle] = useState("");
   const [loadingFolders, setLoadingFolders] = useState(false);
@@ -316,15 +318,28 @@ export function Review() {
 
   const handleRemove = (id: string) => {
     setScannedAlbums(scannedAlbums.filter((album) => album.id !== id));
+    if (editingId === id) {
+      setEditingId(null);
+      setNewUnsavedId(null);
+    }
   };
 
   const handleEdit = (id: string) => {
     const album = scannedAlbums.find((item) => item.id === id);
     if (album) {
       setEditingId(id);
+      setNewUnsavedId(null);
       setEditArtist(album.artist);
       setEditTitle(album.title);
     }
+  };
+
+  const cancelEdit = () => {
+    if (newUnsavedId === editingId && editingId !== null) {
+      setScannedAlbums(scannedAlbums.filter((album) => album.id !== editingId));
+    }
+    setEditingId(null);
+    setNewUnsavedId(null);
   };
 
   const saveEdit = () => {
@@ -341,6 +356,32 @@ export function Review() {
       ),
     );
     setEditingId(null);
+    setNewUnsavedId(null);
+  };
+
+  const useClosestMatch = (albumId: string) => {
+    const album = scannedAlbums.find((item) => item.id === albumId);
+    const match = album?.validation;
+    if (!album || !match?.releaseId || !match.matchedArtist || !match.matchedTitle) {
+      return;
+    }
+
+    setScannedAlbums((currentAlbums) =>
+      currentAlbums.map((item) =>
+        item.id === albumId
+          ? {
+              ...item,
+              artist: match.matchedArtist!,
+              title: match.matchedTitle!,
+              validation: {
+                ...match,
+                status: "valid",
+                message: "Closest Discogs match selected by user",
+              },
+            }
+          : item,
+      ),
+    );
   };
 
   const addManual = () => {
@@ -355,6 +396,7 @@ export function Review() {
       },
     ]);
     setEditingId(newId);
+    setNewUnsavedId(newId);
     setEditArtist("New Artist");
     setEditTitle("New Album");
   };
@@ -617,7 +659,7 @@ export function Review() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                className="bg-neutral-900 border border-neutral-800 rounded-xl p-3 flex items-start justify-between gap-2 group overflow-hidden"
+                className="bg-neutral-900 border border-neutral-800 rounded-xl p-3 flex items-center justify-between gap-2 group overflow-hidden"
               >
                 {editingId === album.id ? (
                   <div className="flex-1 flex flex-col gap-2 mr-2">
@@ -633,12 +675,22 @@ export function Review() {
                       className="bg-neutral-950 text-white px-3 py-2 rounded-lg border border-neutral-700 text-base sm:text-sm focus:outline-none focus:border-emerald-500"
                       placeholder="Title"
                     />
-                    <button
-                      onClick={saveEdit}
-                      className="bg-emerald-600 hover:bg-emerald-500 transition-colors text-white py-2 rounded-lg text-base sm:text-sm mt-1 font-medium touch-manipulation"
-                    >
-                      Save
-                    </button>
+                    <div className="mt-1 flex gap-2">
+                      <button
+                        onClick={saveEdit}
+                        className="min-h-11 flex-1 touch-manipulation rounded-lg bg-emerald-600 py-2 text-base font-medium text-white transition-colors hover:bg-emerald-500 sm:text-sm"
+                        type="button"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={cancelEdit}
+                        className="min-h-11 flex-1 touch-manipulation rounded-lg border border-neutral-700 py-2 text-base font-medium text-neutral-200 transition-colors hover:bg-neutral-800 sm:text-sm"
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="flex-1 pr-2 space-y-2">
@@ -658,6 +710,18 @@ export function Review() {
                     <p className="text-xs text-neutral-500">
                       {validationMessage}
                     </p>
+                    {validationStatus === "invalid" &&
+                      album.validation?.releaseId &&
+                      album.validation.matchedArtist &&
+                      album.validation.matchedTitle && (
+                        <button
+                          onClick={() => useClosestMatch(album.id)}
+                          className="min-h-9 touch-manipulation text-left text-xs font-medium text-amber-300 underline decoration-amber-500/40 underline-offset-2"
+                          type="button"
+                        >
+                          Use closest match and replace fields
+                        </button>
+                      )}
                     {validationStatus === "valid" &&
                       album.validation?.releaseId && (
                         <div className="space-y-2">
@@ -742,10 +806,10 @@ export function Review() {
                 )}
 
                 {editingId !== album.id && (
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex shrink-0 items-center self-center gap-1">
                     <button
                       onClick={() => handleEdit(album.id)}
-                      className="min-h-11 min-w-11 touch-manipulation p-2 text-neutral-500 hover:text-white bg-neutral-800/50 hover:bg-neutral-700 rounded-lg transition-colors"
+                      className="inline-flex min-h-11 min-w-11 touch-manipulation items-center justify-center rounded-lg bg-neutral-800/50 p-2 text-neutral-500 transition-colors hover:bg-neutral-700 hover:text-white"
                       type="button"
                       aria-label={`Edit ${album.title}`}
                     >
@@ -753,7 +817,7 @@ export function Review() {
                     </button>
                     <button
                       onClick={() => handleRemove(album.id)}
-                      className="min-h-11 min-w-11 touch-manipulation p-2 text-red-400 hover:text-red-300 bg-red-400/10 hover:bg-red-400/20 rounded-lg transition-colors"
+                      className="inline-flex min-h-11 min-w-11 touch-manipulation items-center justify-center rounded-lg bg-red-400/10 p-2 text-red-400 transition-colors hover:bg-red-400/20 hover:text-red-300"
                       type="button"
                       aria-label={`Remove ${album.title}`}
                     >

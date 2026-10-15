@@ -245,7 +245,7 @@ def validate_entries():
     for entry in entries:
         artist = str(entry.get("artist", "")).strip()
         title = str(entry.get("title", "")).strip()
-        if artist and title and len(artist) <= 200 and len(title) <= 200:
+        if title and len(artist) <= 200 and len(title) <= 200:
             prefetch_entries.append({"artist": artist, "title": title})
     lookup_context["prefetched_lookup_states"] = prefetch_release_lookup_states(
         prefetch_entries
@@ -256,12 +256,12 @@ def validate_entries():
         artist = str(entry.get("artist", "")).strip()
         title = str(entry.get("title", "")).strip()
 
-        if not artist or not title:
+        if not title:
             validations.append(
                 {
                     "id": entry_id,
                     "status": "invalid",
-                    "message": "Artist and title are required",
+                    "message": "Album title is required",
                 }
             )
             continue
@@ -306,8 +306,8 @@ def validate_entries():
 def release_options():
     artist = str(request.args.get("artist", "")).strip()
     title = str(request.args.get("title", "")).strip()
-    if not artist or not title:
-        return jsonify({"error": "Artist and title are required"}), 400
+    if not title:
+        return jsonify({"error": "Album title is required"}), 400
     if len(artist) > 200 or len(title) > 200:
         return jsonify({"error": "Artist and title must be 200 characters or fewer"}), 400
     if not _consume_user_rate_slot("release-options", 8):
@@ -362,12 +362,12 @@ def validation_status():
 
         artist = str(entry.get("artist", "")).strip()
         title = str(entry.get("title", "")).strip()
-        if not artist or not title:
+        if not title:
             immediate_results.append(
                 {
                     "id": entry["id"],
                     "status": "invalid",
-                    "message": "Artist and title are required",
+                    "message": "Album title is required",
                 }
             )
         elif len(artist) > 200 or len(title) > 200:

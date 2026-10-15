@@ -65,13 +65,13 @@ export function Processing() {
         const skipped: string[] = [];
         const parsed = allLines
           .filter((entry: string) => {
-            if (!entry.includes(" - ")) {
+            const wordCount = entry.trim().split(/\s+/).length;
+            if (wordCount > 12) {
               skipped.push(entry.trim());
               return false;
             }
-            // Reject prose lines (sentences masquerading as Artist - Album)
-            const wordCount = entry.trim().split(/\s+/).length;
-            if (wordCount > 12) {
+            // Short title-only lines are validated against Various Artists.
+            if (!entry.includes(" - ") && wordCount > 8) {
               skipped.push(entry.trim());
               return false;
             }
@@ -81,8 +81,8 @@ export function Processing() {
             const sep = entry.indexOf(" - ");
             return {
               id: String(i + 1),
-              artist: entry.slice(0, sep).trim(),
-              title: entry.slice(sep + 3).trim(),
+              artist: sep < 0 ? "" : entry.slice(0, sep).trim(),
+              title: sep < 0 ? entry.trim() : entry.slice(sep + 3).trim(),
               validation: { status: "pending" as const },
             };
           });
@@ -95,7 +95,7 @@ export function Processing() {
           }).catch(() => {});
           setCapturedImage(null);
           throw new Error(
-            "OCR returned no valid 'Artist - Album' lines. Please retake the image.",
+            "OCR returned no valid album title lines. Please retake the image.",
           );
         }
 
