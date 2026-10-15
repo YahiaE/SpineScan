@@ -22,6 +22,7 @@ from services.discogs_service import (
     enqueue_album_lookup_batch,
     ensure_collection_membership_cache_warm,
     get_collection_folder,
+    get_collection_cache_generation,
     get_discogs_client,
     get_discogs_collection_folders,
     get_discogs_identity,
@@ -70,8 +71,18 @@ def _consume_user_rate_slot(action, max_requests_per_window):
 
 def _build_import_idempotency_keys(folder_id, entries):
     import_fingerprint = build_import_request_fingerprint(folder_id, entries)
-    user_scope = session.get("access_token", "anonymous")
-    key_suffix = f"{user_scope}:{folder_id}:{import_fingerprint}"
+    user_scope = (
+        session.get("discogs_username")
+        or session.get("auth_session_id")
+        or "anonymous"
+    )
+    collection_generation = (
+        get_collection_cache_generation(session.get("discogs_username"), folder_id)
+        or "uninitialized"
+    )
+    key_suffix = (
+        f"v2:{user_scope}:{folder_id}:{collection_generation}:{import_fingerprint}"
+    )
     return (
         f"discogs:import:result:{key_suffix}",
         f"discogs:import:lock:{key_suffix}",

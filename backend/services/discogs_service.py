@@ -1308,6 +1308,17 @@ def _get_collection_cache_state(discogs_username, folder_id):
     return rows[0] if rows else None
 
 
+def get_collection_cache_generation(discogs_username, folder_id):
+    """Return the active generation only when the folder snapshot is complete."""
+    if not discogs_username:
+        return None
+
+    state = _get_collection_cache_state(discogs_username, folder_id)
+    if state and state.get("is_complete"):
+        return state.get("active_generation")
+    return None
+
+
 def _collection_cache_is_fresh(state):
     if not state or not state.get("is_complete") or not state.get("active_generation"):
         return False

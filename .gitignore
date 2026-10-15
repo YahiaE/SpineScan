@@ -19,3 +19,7 @@ frontend/dist/
 
 # Redis monitor exports may contain sensitive job metadata
 redis-monitor.csv
+
+# Local load-test credentials and image fixtures
+.loadtest/
+tests/load/fixtures/*
