@@ -386,187 +386,134 @@ export function Review() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-neutral-950">
-      <div className="p-6 pb-2 space-y-4">
-        <h1 className="text-2xl font-bold text-white mb-1">Detected Albums</h1>
-        <p className="text-neutral-400 text-sm">
-          Review and correct any errors.
-        </p>
-
-        {pollTimedOut && (
-          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 flex items-start gap-3">
-            <ShieldAlert className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="text-yellow-300 text-sm font-medium">
-                Validation is taking longer than expected
-              </p>
-              <p className="text-yellow-400/70 text-xs mt-0.5">
-                The lookup worker may be busy. You can proceed with valid items
-                or{" "}
-                <button
-                  onClick={validateAlbums}
-                  className="underline hover:text-yellow-300 transition-colors"
-                >
-                  retry validation
-                </button>
-                .
-              </p>
-            </div>
-          </div>
-        )}
-
-        {skippedLines.length > 0 && (
-          <div className="bg-neutral-900 border border-neutral-700 rounded-xl p-3">
-            <button
-              onClick={() => setShowSkipped((v) => !v)}
-              className="w-full flex items-center justify-between text-left"
-            >
-              <span className="text-neutral-400 text-sm">
-                {skippedLines.length} line
-                {skippedLines.length !== 1 ? "s" : ""} skipped by OCR parser
-              </span>
-              <span className="text-neutral-500 text-xs">
-                {showSkipped ? "hide" : "show"}
-              </span>
-            </button>
-            {showSkipped && (
-              <ul className="mt-2 space-y-1">
-                {skippedLines.map((line, i) => (
-                  <li
-                    key={i}
-                    className="text-neutral-500 text-xs font-mono truncate"
-                  >
-                    {line}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
-        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 space-y-4">
-          <div>
-            <p className="text-sm text-neutral-400 mb-2">
-              Target Discogs collection
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-neutral-950">
+      <div className="shrink-0 space-y-2 border-b border-neutral-800 px-3 pb-2 pt-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-semibold text-white">
+              Detected CDs
+            </h1>
+            <p className="text-xs text-neutral-400">
+              {validCount} valid · {invalidCount} invalid · {pendingCount} pending
             </p>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <select
-                value={selectedCollectionId ?? ""}
-                onChange={(event) => {
-                  setSelectedCollectionId(Number(event.target.value));
-                  setCollectionRefreshMessage(null);
-                }}
-                disabled={loadingFolders || collectionFolders.length === 0}
-                className="min-w-0 flex-1 bg-neutral-950 text-white px-3 py-3 rounded-lg border border-neutral-700 focus:outline-none focus:border-emerald-500"
-              >
-                {collectionFolders.map((folder) => (
-                  <option key={folder.id} value={folder.id}>
-                    {folder.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={() => void handleRefreshCollection()}
-                disabled={
-                  loadingFolders ||
-                  refreshingCollection ||
-                  selectedCollectionId === null
-                }
-                className="flex shrink-0 items-center justify-center gap-2 rounded-lg border border-neutral-700 px-4 py-3 text-sm font-medium text-neutral-200 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-                type="button"
-              >
-                <RefreshCw
-                  className={`h-4 w-4 ${refreshingCollection ? "animate-spin" : ""}`}
-                />
-                {refreshingCollection ? "Refreshing..." : "Refresh collection"}
-              </button>
-            </div>
-            {collectionRefreshMessage && (
-              <p
-                className={`mt-2 text-sm ${collectionRefreshMessage.error ? "text-red-400" : "text-emerald-400"}`}
-                role="status"
-              >
-                {collectionRefreshMessage.text}
-              </p>
-            )}
-            {folderError && (
-              <p className="text-red-400 text-sm mt-2">{folderError}</p>
-            )}
           </div>
-
-          <div className="flex gap-2 text-sm">
-            <span className="px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-              {validCount} valid
-            </span>
-            <span className="px-3 py-1 rounded-full bg-red-500/10 text-red-300 border border-red-500/30">
-              {invalidCount} invalid
-            </span>
-            <span className="px-3 py-1 rounded-full bg-neutral-800 text-neutral-300 border border-neutral-700">
-              {pendingCount} pending
-            </span>
+          <div className="flex shrink-0 items-center gap-2 text-sm tabular-nums text-neutral-300">
+            {verificationActive && (
+              <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
+            )}
+            <span>{validCount}/{totalCount}</span>
           </div>
+        </div>
 
-          {totalCount > 0 && (
-            <div className="rounded-xl border border-neutral-800 bg-neutral-950/80 p-3 space-y-2">
-              <div className="flex items-center justify-between text-xs text-neutral-400">
-                <div className="flex items-center gap-2">
-                  {verificationActive && (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                  )}
-                  <span>
-                    {verificationActive
-                      ? "Verifying titles"
-                      : pendingCount === 0
-                        ? "Verification complete"
-                        : "Ready to validate"}
-                  </span>
-                </div>
-                <span>
-                  {validCount}/{totalCount} ({progressPercent}%)
-                </span>
-              </div>
+        {totalCount > 0 && (
+          <div className="h-1.5 overflow-hidden rounded-full bg-neutral-800">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        )}
 
-              <div className="h-2 w-full rounded-full bg-neutral-800 overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all duration-500 ${verificationActive ? "bg-emerald-500" : "bg-emerald-600"}`}
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
+        <div className="flex min-w-0 gap-2">
+          <select
+            aria-label="Target Discogs collection"
+            value={selectedCollectionId ?? ""}
+            onChange={(event) => {
+              setSelectedCollectionId(Number(event.target.value));
+              setCollectionRefreshMessage(null);
+            }}
+            disabled={loadingFolders || collectionFolders.length === 0}
+            className="min-h-11 min-w-0 flex-1 touch-manipulation rounded-lg border border-neutral-700 bg-neutral-950 px-3 text-base text-white focus:border-emerald-500 focus:outline-none sm:text-sm"
+          >
+            {collectionFolders.map((folder) => (
+              <option key={folder.id} value={folder.id}>
+                {folder.name}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => void handleRefreshCollection()}
+            disabled={
+              loadingFolders ||
+              refreshingCollection ||
+              selectedCollectionId === null
+            }
+            className="flex min-h-11 shrink-0 touch-manipulation items-center justify-center gap-1.5 rounded-lg border border-neutral-700 px-3 text-sm font-medium text-neutral-200 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${refreshingCollection ? "animate-spin" : ""}`}
+            />
+            <span>{refreshingCollection ? "Refreshing" : "Refresh"}</span>
+          </button>
+        </div>
 
-              <p className="text-xs text-neutral-500">
-                {pendingCount > 0
-                  ? `${pendingCount} title${pendingCount === 1 ? " is" : "s are"} still pending validation.`
-                  : invalidCount > 0
-                    ? "Validation finished. Edit or remove invalid titles to continue."
-                    : "All titles are valid and ready to import."}
-              </p>
-            </div>
-          )}
+        {(collectionRefreshMessage || folderError) && (
+          <p
+            className={`text-xs ${collectionRefreshMessage?.error || folderError ? "text-red-400" : "text-emerald-400"}`}
+            role="status"
+          >
+            {collectionRefreshMessage?.text ?? folderError}
+          </p>
+        )}
 
-          <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+        <div className="flex gap-2">
+          <button
+            onClick={validateAlbums}
+            disabled={validating || scannedAlbums.length === 0}
+            className="flex min-h-10 flex-1 touch-manipulation items-center justify-center gap-2 rounded-lg bg-neutral-800 px-3 text-sm font-medium text-white transition-colors hover:bg-neutral-700 disabled:opacity-50"
+            type="button"
+          >
+            <ShieldCheck className="h-4 w-4" />
+            {validating ? "Validating..." : "Validate"}
+          </button>
+          <button
+            onClick={removeInvalid}
+            disabled={invalidCount === 0}
+            className="flex min-h-10 flex-1 touch-manipulation items-center justify-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 text-sm font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50"
+            type="button"
+          >
+            <ShieldAlert className="h-4 w-4" /> Remove invalid
+          </button>
+        </div>
+
+        {validationError && (
+          <p className="text-xs text-red-400" role="alert">
+            {validationError}
+          </p>
+        )}
+        {pollTimedOut && (
+          <p className="text-xs text-yellow-300" role="status">
+            Validation is slow. You can proceed with valid entries or{" "}
             <button
               onClick={validateAlbums}
-              disabled={validating || scannedAlbums.length === 0}
-              className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white py-2.5 sm:py-3 px-3 rounded-xl text-sm sm:text-base font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+              className="touch-manipulation underline"
+              type="button"
             >
-              <ShieldCheck className="w-4 h-4" />
-              {validating ? "Validating..." : "Validate Entries"}
+              retry
             </button>
-            <button
-              onClick={removeInvalid}
-              disabled={invalidCount === 0}
-              className="flex-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 py-2.5 sm:py-3 px-3 rounded-xl text-sm sm:text-base font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-            >
-              <ShieldAlert className="w-4 h-4" /> Remove Invalid
-            </button>
-          </div>
-          {validationError && (
-            <p className="text-red-400 text-sm">{validationError}</p>
-          )}
-        </div>
+            .
+          </p>
+        )}
+        {skippedLines.length > 0 && (
+          <details className="text-xs text-neutral-400">
+            <summary className="touch-manipulation cursor-pointer">
+              {skippedLines.length} OCR line
+              {skippedLines.length !== 1 ? "s" : ""} skipped
+            </summary>
+            <ul className="mt-1 max-h-20 space-y-1 overflow-y-auto">
+              {skippedLines.map((line, index) => (
+                <li key={index} className="truncate font-mono text-neutral-500">
+                  {line}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="min-h-0 flex-1 touch-manipulation overscroll-y-contain overflow-y-auto px-3 py-2">
+        <div className="space-y-2 pb-2">
         <AnimatePresence>
           {scannedAlbums.map((album) => {
             if (!album) return null;
@@ -585,25 +532,25 @@ export function Review() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-start justify-between gap-3 group overflow-hidden"
+                className="bg-neutral-900 border border-neutral-800 rounded-xl p-3 flex items-start justify-between gap-2 group overflow-hidden"
               >
                 {editingId === album.id ? (
                   <div className="flex-1 flex flex-col gap-2 mr-2">
                     <input
                       value={editArtist}
                       onChange={(event) => setEditArtist(event.target.value)}
-                      className="bg-neutral-950 text-white px-3 py-2 rounded-lg border border-neutral-700 text-sm focus:outline-none focus:border-emerald-500"
+                      className="bg-neutral-950 text-white px-3 py-2 rounded-lg border border-neutral-700 text-base sm:text-sm focus:outline-none focus:border-emerald-500"
                       placeholder="Artist"
                     />
                     <input
                       value={editTitle}
                       onChange={(event) => setEditTitle(event.target.value)}
-                      className="bg-neutral-950 text-white px-3 py-2 rounded-lg border border-neutral-700 text-sm focus:outline-none focus:border-emerald-500"
+                      className="bg-neutral-950 text-white px-3 py-2 rounded-lg border border-neutral-700 text-base sm:text-sm focus:outline-none focus:border-emerald-500"
                       placeholder="Title"
                     />
                     <button
                       onClick={saveEdit}
-                      className="bg-emerald-600 hover:bg-emerald-500 transition-colors text-white py-2 rounded-lg text-sm mt-1 font-medium"
+                      className="bg-emerald-600 hover:bg-emerald-500 transition-colors text-white py-2 rounded-lg text-base sm:text-sm mt-1 font-medium touch-manipulation"
                     >
                       Save
                     </button>
@@ -633,13 +580,17 @@ export function Review() {
                   <div className="flex items-center gap-1 shrink-0">
                     <button
                       onClick={() => handleEdit(album.id)}
-                      className="p-2 text-neutral-500 hover:text-white bg-neutral-800/50 hover:bg-neutral-700 rounded-lg transition-colors"
+                      className="min-h-11 min-w-11 touch-manipulation p-2 text-neutral-500 hover:text-white bg-neutral-800/50 hover:bg-neutral-700 rounded-lg transition-colors"
+                      type="button"
+                      aria-label={`Edit ${album.title}`}
                     >
                       <Edit2 className="w-4 h-4" />
                     </button>
                     <button
                       onClick={() => handleRemove(album.id)}
-                      className="p-2 text-red-400 hover:text-red-300 bg-red-400/10 hover:bg-red-400/20 rounded-lg transition-colors"
+                      className="min-h-11 min-w-11 touch-manipulation p-2 text-red-400 hover:text-red-300 bg-red-400/10 hover:bg-red-400/20 rounded-lg transition-colors"
+                      type="button"
+                      aria-label={`Remove ${album.title}`}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -652,17 +603,23 @@ export function Review() {
 
         <button
           onClick={addManual}
-          className="w-full py-4 border-2 border-dashed border-neutral-800 rounded-xl text-neutral-400 font-medium flex items-center justify-center gap-2 hover:bg-neutral-900 hover:text-white hover:border-neutral-600 transition-colors mt-2"
+          className="w-full min-h-12 touch-manipulation py-3 border-2 border-dashed border-neutral-800 rounded-xl text-neutral-400 font-medium flex items-center justify-center gap-2 hover:bg-neutral-900 hover:text-white hover:border-neutral-600 transition-colors mt-2"
+          type="button"
         >
           <Plus className="w-4 h-4" /> Add Missing Album
         </button>
       </div>
+      </div>
 
-      <div className="p-6 bg-neutral-950 border-t border-neutral-900 shrink-0">
+      <div
+        className="shrink-0 border-t border-neutral-800 bg-neutral-950 px-3 pt-2"
+        style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}
+      >
         <button
           onClick={() => navigate("/confirm")}
           disabled={!canImport}
-          className="w-full bg-emerald-600 hover:bg-emerald-500 transition-colors text-white py-4 rounded-xl font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:bg-emerald-600"
+          className="w-full min-h-12 touch-manipulation bg-emerald-600 hover:bg-emerald-500 transition-colors text-white px-3 rounded-xl font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:bg-emerald-600"
+          type="button"
         >
           Import to {selectedFolderName} <ArrowRight className="w-5 h-5" />
         </button>

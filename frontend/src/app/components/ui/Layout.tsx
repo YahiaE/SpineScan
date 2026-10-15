@@ -50,6 +50,7 @@ export function Layout() {
 
   const isHomeOrWelcome =
     location.pathname === "/" || location.pathname === "/home";
+  const isReviewPage = location.pathname === "/review";
 
   return (
     <div className="min-h-[100svh] bg-neutral-900 flex justify-center sm:py-8 sm:px-4 text-white">
@@ -86,7 +87,7 @@ export function Layout() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
-              className="absolute inset-0 flex flex-col overflow-y-auto"
+              className={`absolute inset-0 flex flex-col ${isReviewPage ? "overflow-hidden" : "overflow-y-auto"}`}
               style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
             >
               <Outlet />
