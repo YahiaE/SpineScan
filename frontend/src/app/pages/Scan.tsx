@@ -525,11 +525,11 @@ export function Scan() {
         </div>
       ) : (
         <div className="flex-1 min-h-0 relative flex flex-col bg-neutral-950 overflow-hidden">
-          <div className="flex-1 min-h-0 m-3 border border-neutral-700 rounded-xl overflow-hidden">
+          <div className="flex-1 min-h-0 m-3 border border-neutral-700 rounded-xl overflow-hidden bg-black">
             <img
               src={preview}
               alt="Captured photo"
-              className="w-full h-full object-cover"
+              className="w-full h-full object-contain"
             />
           </div>
 
