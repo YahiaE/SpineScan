@@ -24,14 +24,14 @@ def main(url):
     client = get_gemini_client()
 
     prompt = """
-Extract artist and album titles from CD spine images or CD front cover images. 
+Extract artist and album titles from CD spine images or CD front cover images.
 
 Guidelines:
-1. **Visual Identification (Reverse Image Search):** If text is partially missing, obscured, illegible, or absent entirely, use visual features (cover artwork, distinctive typography, band logos, imagery, and design style) to identify the album and artist via visual matching—similar to a reverse image search.
-2. Strip out catalog numbers (e.g. CD-1234, 88697...), record labels (Epic, Columbia, BMG, Universal), and legal boilerplate.
-3. Ignore generic text or promotional taglines unless it forms part of the primary artist or album name.
+1. **Visual & Conceptual Identification:** If text is absent, obscured, handwritten, or embedded in abstract/found-object photography, perform visual matching. Analyze cover artwork, distinctive typography, band logos, and iconic imagery just like a reverse-image search to identify the album and artist.
+2. Strip out catalog numbers, record labels, and legal boilerplate.
+3. Ignore generic text or promotional taglines unless part of the primary artist or album name.
 4. Clean up minor OCR defects and standard capitalization.
-5. Handle multiple CD items in a single image or batch (spines, front covers, or a mix), and output each distinct album found.
+5. Handle multiple items in a single image or batch, and output each distinct album found.
 
 Output format:
 Artist - Album
