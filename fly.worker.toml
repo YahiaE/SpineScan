@@ -6,3 +6,12 @@ primary_region = "iad"
 
 [processes]
   worker = "python backend/worker.py"
+
+# Use double brackets [[restart]] for Fly.io's array schema
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

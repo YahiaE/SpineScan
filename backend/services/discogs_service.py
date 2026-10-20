@@ -935,6 +935,16 @@ def is_various_artist_name(artist):
     return normalize_text(artist) in {"various", "various artists"}
 
 
+def is_various_lookup(artist):
+    """True when the scanned artist is blank or a "Various" variant."""
+    text = str(artist or "").strip()
+    if not text:
+        return True
+    return is_various_artist_name(text) or is_various_artist_name(
+        primary_artist_name(text)
+    )
+
+
 def score_candidate(artist, title, matched_artist, matched_title):
     """Score a Discogs candidate against OCR-extracted artist and title."""
     artist_primary = primary_artist_name(artist)
@@ -957,6 +967,12 @@ def score_candidate(artist, title, matched_artist, matched_title):
     exact_artist = normalize_text(artist_primary) == normalize_text(
         matched_artist_primary
     )
+    if is_various_artist_name(artist_primary) and is_various_artist_name(
+        matched_artist_primary
+    ):
+        # "Various" and "Various Artists" are the same credit on Discogs.
+        artist_score = 1.0
+        exact_artist = True
     exact_title = title_base == matched_title_base and bool(title_base)
 
     combined_score = (artist_score * 0.45) + (title_score * 0.55)
@@ -1074,8 +1090,27 @@ def iter_release_candidates(
     rate_scope="global",
 ):
     """Yield unique Discogs release candidates from multiple query strategies."""
+    various_mode = is_various_lookup(artist)
     primary_artist = primary_artist_name(artist)
-    if artist.strip():
+
+    if various_mode:
+        # Same strategy set whether OCR gave "", "Various" or "Various Artists".
+        queries = [
+            {
+                "type": "release",
+                "artist": "Various",
+                "release_title": title,
+                "format": "CD",
+            },
+            {
+                "type": "release",
+                "artist": "Various Artists",
+                "release_title": title,
+                "format": "CD",
+            },
+            {"type": "release", "release_title": title, "format": "CD"},
+        ]
+    else:
         queries = [
             {
                 "type": "release",
@@ -1093,25 +1128,10 @@ def iter_release_candidates(
             {"type": "release", "q": f"{primary_artist} {title}", "format": "CD"},
             {"type": "release", "q": title, "artist": artist, "format": "CD"},
         ]
-    else:
-        queries = [
-            {
-                "type": "release",
-                "artist": "Various",
-                "release_title": title,
-                "format": "CD",
-            },
-            {
-                "type": "release",
-                "artist": "Various Artists",
-                "release_title": title,
-                "format": "CD",
-            },
-            {"type": "release", "release_title": title, "format": "CD"},
-        ]
     queries = queries[: max(1, DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES)]
 
     seen_release_ids = set()
+    yielded_count = 0
     last_search_error = None
 
     for query in queries:
@@ -1124,38 +1144,43 @@ def iter_release_candidates(
                 authenticated=authenticated,
                 rate_scope=rate_scope,
             )
-        except Exception as error:
-            last_search_error = error
-            continue
-
-        for index, result in enumerate(
-            iter_discogs_paginated_items(
+            page_iter = iter_discogs_paginated_items(
                 search_results,
                 authenticated=authenticated,
                 max_pages=DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY,
                 budget=budget,
                 rate_scope=rate_scope,
             )
-        ):
-            if index >= 10:
-                break
 
-            release_id = getattr(result, "id", None)
-            if not release_id or release_id in seen_release_ids:
-                continue
+            for index, result in enumerate(page_iter):
+                if index >= 10:
+                    break
 
-            if not is_cd_release_result(result):
-                continue
-
-            if not artist.strip():
-                matched_artist, _ = parse_release_result(result)
-                if not is_various_artist_name(matched_artist):
+                release_id = getattr(result, "id", None)
+                if not release_id or release_id in seen_release_ids:
                     continue
 
-            seen_release_ids.add(release_id)
-            yield result
+                if not is_cd_release_result(result):
+                    continue
 
-    if last_search_error is not None:
+                if various_mode:
+                    matched_artist, _ = parse_release_result(result)
+                    if not is_various_artist_name(matched_artist):
+                        continue
+
+                seen_release_ids.add(release_id)
+                yielded_count += 1
+                yield result
+        except Exception as error:
+            # Includes errors raised while paging, which previously escaped the
+            # loop and aborted the whole lookup. Move on to the next strategy.
+            last_search_error = error
+            continue
+
+    # Only fail the lookup if nothing usable was found. If candidates were
+    # already yielded, a later strategy failing must not discard them (and must
+    # not leave the album uncached, which causes the re-enqueue loop).
+    if last_search_error is not None and yielded_count == 0:
         raise last_search_error
 
 
@@ -1180,7 +1205,7 @@ def find_best_release_match(
     ):
         matched_artist, matched_title = parse_release_result(result)
         scores = score_candidate(
-            matched_artist if not artist.strip() else artist,
+            matched_artist if is_various_lookup(artist) else artist,
             title,
             matched_artist,
             matched_title,
@@ -1283,7 +1308,7 @@ def get_discogs_release_options(
     ):
         matched_artist, matched_title = parse_release_result(result)
         scores = score_candidate(
-            matched_artist if not artist.strip() else artist,
+            matched_artist if is_various_lookup(artist) else artist,
             title,
             matched_artist,
             matched_title,
