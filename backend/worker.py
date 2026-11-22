@@ -40,7 +40,7 @@ def build_redis_connection():
         "retry": retry_policy,
         "retry_on_timeout": True,
         "max_connections": REDIS_WORKER_MAX_CONNECTIONS,
-        "socket_timeout": 30,
+        "socket_timeout": RQ_WORKER_DEFAULT_TTL,
     }
 
     if REDIS_URL:
@@ -60,21 +60,24 @@ def build_redis_connection():
     return redis.Redis(connection_pool=pool)
 
 
+def build_worker(connection):
+    queue = Queue(DISCOGS_LOOKUP_QUEUE, connection=connection)
+    return Worker(
+        [queue],
+        connection=connection,
+        default_worker_ttl=RQ_WORKER_DEFAULT_TTL,
+        maintenance_interval=RQ_WORKER_MAINTENANCE_INTERVAL,
+        job_monitoring_interval=RQ_WORKER_JOB_MONITORING_INTERVAL,
+    )
+
+
 if __name__ == "__main__":
     queue_name = DISCOGS_LOOKUP_QUEUE
 
     while True:
         try:
             connection = build_redis_connection()
-            queue = Queue(queue_name, connection=connection)
-
-            worker = Worker(
-                [queue],
-                connection=connection,
-                default_worker_ttl=RQ_WORKER_DEFAULT_TTL,
-                maintenance_interval=min(RQ_WORKER_MAINTENANCE_INTERVAL, 30),
-                job_monitoring_interval=RQ_WORKER_JOB_MONITORING_INTERVAL,
-            )
+            worker = build_worker(connection)
 
             # Blocks and processes incoming jobs
             worker.work(logging_level="INFO")

@@ -8,8 +8,8 @@ import { apiFetch } from "../apiClient";
 const API_BASE = "/api";
 const IMPORT_REQUEST_TIMEOUT_MS = 120000;
 const FINALIZE_REQUEST_TIMEOUT_MS = 15000;
-const IMPORT_STATUS_POLL_INTERVAL_MS = 2000;
-const IMPORT_STATUS_MAX_ATTEMPTS = 180;
+const IMPORT_STATUS_POLL_INTERVAL_MS = 5000;
+const IMPORT_STATUS_MAX_ATTEMPTS = 72;
 
 type ImportRequest = {
   folder_id: number;
