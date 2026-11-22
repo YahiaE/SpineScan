@@ -1,0 +1,13 @@
+app = "ye-spinescan-redis"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.redis"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"

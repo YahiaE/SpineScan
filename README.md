@@ -63,6 +63,19 @@ SpineScan uses a split frontend/backend architecture with async workers, Redis c
 	- Supabase Postgres: persisted capture manifests, collection membership cache (per-user per-folder), album lookup data, and import history.
 	- Supabase Storage: uploaded capture images.
 
+	## Redis on Fly.io
+
+	The API and worker connect to the private `ye-spinescan-redis.internal` app in
+	`iad`. Redis uses a Fly secret for its password and a single 512 MB machine
+	with a 256 MB `noeviction` memory cap. It has no volume or AOF/RDB persistence:
+	queued jobs and other transient Redis state are lost if the machine restarts.
+	Supabase remains the durable source of truth.
+
+	Set `REDIS_PASSWORD` on the Redis app and `REDIS_URL` on both the API and worker
+	using `fly secrets set`. `REDIS_URL` takes precedence; the existing
+	`UPSTASH_REDIS_URL` setting remains a fallback for rollback until the migration
+	is confirmed. See [`fly.redis.toml`](fly.redis.toml) and [`Dockerfile.redis`](Dockerfile.redis).
+
 ## Repository layout
 
 - [frontend](frontend): React app.

@@ -42,9 +42,8 @@ if not SUPABASE_SECRET_KEY:
         "SUPABASE_SECRET_KEY (preferred) must be set for backend startup"
     )
 
-# Upstash works over the standard Redis protocol URL (usually rediss://...).
-# Prefer UPSTASH_REDIS_URL when provided, while keeping REDIS_URL for backward compatibility.
-REDIS_URL = os.getenv("UPSTASH_REDIS_URL") or os.getenv("REDIS_URL")
+# Prefer REDIS_URL, retaining the Upstash variable as a migration fallback.
+REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))
