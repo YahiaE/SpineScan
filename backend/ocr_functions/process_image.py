@@ -1,6 +1,8 @@
 import os
+import time
 from dotenv import load_dotenv
 from google.genai import types
+from google.genai.errors import APIError
 from pydantic import BaseModel
 from services.lazy_loader import get_gemini_client
 
@@ -26,25 +28,33 @@ def execute_scan(client, image_bytes, prompt, model_name):
         temperature=0.4,
     )
 
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[
-                types.Part.from_bytes(
-                    data=image_bytes,
-                    mime_type="image/jpeg",
-                ),
-                prompt,
-            ],
-            config=config,
-        )
-        
-        parsed: SpineScanResult = response.parsed
-        if parsed and parsed.items:
-            return parsed
-    except Exception as e:
-        print(f"[{model_name}] Generation error: {e}")
-    
+    for attempt in range(2):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Part.from_bytes(
+                        data=image_bytes,
+                        mime_type="image/jpeg",
+                    ),
+                    prompt,
+                ],
+                config=config,
+            )
+
+            parsed: SpineScanResult = response.parsed
+            if parsed and parsed.items:
+                return parsed
+            return None
+        except APIError as error:
+            if error.code == 503 and attempt == 0:
+                time.sleep(1)
+                continue
+            print(f"[{model_name}] Generation error: {error}")
+        except Exception as error:
+            print(f"[{model_name}] Generation error: {error}")
+        break
+
     return None
 
 
@@ -73,12 +83,17 @@ No explanations, scores, or metadata.
 """
 
     # Tier 1: Try fast, lightweight model first
-    parsed = execute_scan(client, image_bytes, prompt, "gemini-2.5-flash-lite")
+    parsed = execute_scan(client, image_bytes, prompt, "gemini-3.5-flash-lite")
 
     # Tier 2: Fallback to more capable model if Tier 1 comes up empty
     if not parsed or not parsed.items:
         print("Tier 1 (flash-lite) yielded no results. Triggering fallback to gemini-3.8-flash...")
         parsed = execute_scan(client, image_bytes, prompt, "gemini-3.8-flash")
+
+    # Tier 3: Use a stable model if the latest Flash model is unavailable.
+    if not parsed or not parsed.items:
+        print("Tier 2 yielded no results. Triggering fallback to gemini-3.6-flash...")
+        parsed = execute_scan(client, image_bytes, prompt, "gemini-3.6-flash")
 
     # Format and return the final matched items
     try:
