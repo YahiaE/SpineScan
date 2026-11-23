@@ -165,6 +165,7 @@ def main():
         sys.path.insert(0, str(BACKEND_DIR))
 
         try:
+            from flask import session as flask_session
             from app_factory import create_app
             from extensions import redis_conn as backend_redis, supabase as backend_supabase
             from services.discogs_service import (
@@ -231,7 +232,7 @@ def main():
             app = create_app()
             app.config.update(TESTING=True)
             with app.test_client() as client:
-                with client.session_transaction() as flask_session:
+                with app.test_request_context():
                     try:
                         persist_discogs_auth_tokens(
                             os.environ["DISCOGS_BENCHMARK_ACCESS_TOKEN"],
@@ -240,6 +241,8 @@ def main():
                         )
                     finally:
                         auth_session_id = flask_session.get("auth_session_id")
+                    if not auth_session_id:
+                        raise RuntimeError("Could not establish the benchmark auth session")
                     calls_before = get_discogs_call_metrics()
                     identity = get_discogs_identity(get_discogs_client())
                     actual_username = str(getattr(identity, "username", "")).casefold()
@@ -251,8 +254,9 @@ def main():
                             "Discogs access token username does not match "
                             "DISCOGS_BENCHMARK_USERNAME"
                         )
-                if not auth_session_id:
-                    raise RuntimeError("Could not establish the benchmark auth session")
+                    client_session_data = dict(flask_session)
+                with client.session_transaction() as client_session:
+                    client_session.update(client_session_data)
 
                 queue_stats = get_lookup_queue_stats()
                 worker_count = int(queue_stats.get("workers_online", -1))
