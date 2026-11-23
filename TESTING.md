@@ -49,3 +49,64 @@ Build both deployable images locally:
 docker build -f Dockerfile.api -t spinescan-api .
 docker build -f Dockerfile.worker -t spinescan-worker .
 ```
+
+## Live Discogs lookup benchmark
+
+The manually dispatched **Live Discogs benchmark** workflow measures the real
+`POST /discogs/validate` Flask route. It sends live Discogs searches and uses
+the application's synchronous cache-miss fallback (the workflow starts no RQ
+worker). Cache-hit samples read the durable Supabase `albums` table and are
+checked to make no Discogs API calls. The benchmark does not import releases or
+write to a Discogs collection.
+
+The workflow makes two cold lookup requests and three warm-hit requests for
+each probe album (eight validation requests total). Each lookup is capped at
+three Discogs calls, two query strategies, one page per strategy, and two
+attempts per API call. It also makes one authenticated identity request to
+confirm the supplied token belongs to the configured dummy account and stops
+on the first Discogs 429. This stays well below the configured authenticated
+Discogs rate limit in normal operation. It reports min, p50, p95, max, and
+error counts for cache misses and hits to the GitHub Actions step summary.
+
+### One-time setup
+
+1. Create a dedicated Discogs test account and a Discogs application for it.
+   Complete OAuth authorization once outside CI to obtain the account's
+   access-token pair. CI does not perform browser login or store the account
+   password.
+2. Create a **dedicated, non-production Supabase project** with the same
+   `albums` table/schema used by the backend. The workflow needs its project URL
+   and service-role key because live cache misses write lookup results. Run
+   [`backend/sql/albums.sql`](./backend/sql/albums.sql) in the Supabase SQL
+   Editor to create the table and indexes. The service-role key bypasses RLS;
+   no client-facing policies are needed.
+3. Add these repository Actions secrets:
+   - `DISCOGS_CONSUMER_KEY`
+   - `DISCOGS_CONSUMER_SECRET`
+   - `DISCOGS_BENCHMARK_ACCESS_TOKEN`
+   - `DISCOGS_BENCHMARK_ACCESS_TOKEN_SECRET`
+   - `DISCOGS_BENCHMARK_USERNAME`
+   - `SPINE_SCAN_BENCHMARK_SUPABASE_URL`
+   - `SPINE_SCAN_BENCHMARK_SUPABASE_SECRET_KEY`
+4. Add the repository Actions variable
+   `SPINE_SCAN_BENCHMARK_DATABASE_CONFIRMATION` with the exact value
+   `dedicated-benchmark-project`. This is a deliberate write-safety guard; do
+   not set it for a production/shared database.
+5. Dispatch the workflow from the `main` branch. It runs only on manual
+   dispatch, is serialized, and uses a fresh Actions Redis service. It never
+   runs on pushes or pull requests.
+
+The fixed probes are `Radiohead / OK Computer` and `Nirvana / Nevermind`. The
+runner checks that neither has a pre-existing durable cache row nor Redis
+lookup state and aborts rather than overwriting pre-existing data. Rows and
+lookup markers for these exact keys and the temporary auth-session record are
+removed in cleanup. A cleanup failure fails the job and must be resolved
+before rerunning. Use this workflow only with its dedicated Supabase project;
+the explicit confirmation value cannot establish that a database is actually
+isolated.
+
+The measurements are in-process Flask route latency, not deployed-host HTTP
+latency. They include route/cache work and the live synchronous Discogs lookup
+on misses; they do not measure RQ queue wait or worker runtime. Results depend
+on external Discogs/network conditions. Reauthorize or replace the token
+secrets if the dummy account's authorization is revoked.
