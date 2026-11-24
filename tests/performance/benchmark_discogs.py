@@ -107,13 +107,64 @@ def validate_request(client, artist, title, entry_id):
     return elapsed_ms, result, None
 
 
+def reset_probe_state(
+    supabase,
+    redis_conn,
+    normalized_key,
+    expected_release_id,
+    cleanup_keys,
+    pending_index_key,
+):
+    rows = (
+        supabase.table("albums")
+        .select("discogs_release_id")
+        .eq("normalized_key", normalized_key)
+        .execute()
+    )
+    existing_rows = getattr(rows, "data", None) or []
+    if len(existing_rows) != 1 or int(
+        existing_rows[0].get("discogs_release_id") or 0
+    ) != expected_release_id:
+        raise RuntimeError(
+            f"Probe {normalized_key} changed unexpectedly; refusing to reset it"
+        )
+
+    supabase.table("albums").delete().eq(
+        "normalized_key", normalized_key
+    ).eq("discogs_release_id", expected_release_id).execute()
+
+    remaining_rows = (
+        supabase.table("albums")
+        .select("normalized_key")
+        .eq("normalized_key", normalized_key)
+        .execute()
+    )
+    if getattr(remaining_rows, "data", None):
+        raise RuntimeError(f"Could not clear the previous probe row for {normalized_key}")
+
+    pending_key, result_key = (
+        cleanup_keys[0](normalized_key),
+        cleanup_keys[1](normalized_key),
+    )
+    redis_conn.delete(pending_key, result_key)
+    redis_conn.zrem(pending_index_key, pending_key)
+    if redis_conn.exists(pending_key, result_key):
+        raise RuntimeError(f"Could not clear Redis lookup state for {normalized_key}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--hit-iterations",
+        "--miss-iterations",
         type=int,
         default=3,
-        help="Warm cache-hit requests per album (1-5; default: 3)",
+        help="Cold cache-miss requests per album (1-3; default: 3)",
+    )
+    parser.add_argument(
+        "--hit-iterations",
+        type=int,
+        default=5,
+        help="Warm cache-hit requests per album (1-5; default: 5)",
     )
     args = parser.parse_args()
 
@@ -134,6 +185,8 @@ def main():
     get_discogs_call_metrics = None
     calls_before = None
 
+    if not 1 <= args.miss_iterations <= 3:
+        failures.append("--miss-iterations must be between 1 and 3")
     if not 1 <= args.hit_iterations <= 5:
         failures.append("--hit-iterations must be between 1 and 5")
     missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
@@ -267,33 +320,56 @@ def main():
                     )
 
                 cold_results = {}
-                for index, (artist, title) in enumerate(DEFAULT_ALBUMS, start=1):
-                    before_metrics = get_discogs_call_metrics()
-                    elapsed, result, error = validate_request(
-                        client, artist, title, f"cold-{index}"
-                    )
-                    samples["cache-miss"].append(elapsed)
-                    after = get_discogs_call_metrics()
-                    if (
-                        after["rate_limited_429_total"]
-                        > before_metrics["rate_limited_429_total"]
+                stop_cold_samples = False
+                for miss_index in range(1, args.miss_iterations + 1):
+                    for album_index, (artist, title) in enumerate(
+                        DEFAULT_ALBUMS, start=1
                     ):
-                        errors["cache-miss"] += 1
-                        failures.append(
-                            f"cache-miss {artist} / {title}: Discogs returned HTTP 429; stopping live requests"
+                        key = album_lookup_normalized_key(artist, title)
+                        before_metrics = get_discogs_call_metrics()
+                        elapsed, result, error = validate_request(
+                            client,
+                            artist,
+                            title,
+                            f"cold-{miss_index}-{album_index}",
                         )
+                        samples["cache-miss"].append(elapsed)
+                        after = get_discogs_call_metrics()
+                        if (
+                            after["rate_limited_429_total"]
+                            > before_metrics["rate_limited_429_total"]
+                        ):
+                            errors["cache-miss"] += 1
+                            failures.append(
+                                f"cache-miss {artist} / {title}: Discogs returned HTTP 429; stopping live requests"
+                            )
+                            stop_cold_samples = True
+                            break
+                        if error:
+                            errors["cache-miss"] += 1
+                            failures.append(f"cache-miss {artist} / {title}: {error}")
+                            stop_cold_samples = True
+                            break
+                        if after["calls_total"] <= before_metrics["calls_total"]:
+                            errors["cache-miss"] += 1
+                            failures.append(
+                                f"cache-miss {artist} / {title}: no live Discogs API call was recorded"
+                            )
+                            stop_cold_samples = True
+                            break
+                        cold_results[key] = result
+
+                        if miss_index < args.miss_iterations:
+                            reset_probe_state(
+                                supabase,
+                                redis_conn,
+                                key,
+                                int(result["release_id"]),
+                                cleanup_keys,
+                                pending_index_key,
+                            )
+                    if stop_cold_samples:
                         break
-                    if error:
-                        errors["cache-miss"] += 1
-                        failures.append(f"cache-miss {artist} / {title}: {error}")
-                        continue
-                    if after["calls_total"] <= before_metrics["calls_total"]:
-                        errors["cache-miss"] += 1
-                        failures.append(
-                            f"cache-miss {artist} / {title}: no live Discogs API call was recorded"
-                        )
-                        continue
-                    cold_results[album_lookup_normalized_key(artist, title)] = result
 
                 api_calls = get_discogs_call_metrics()["calls_total"] - calls_before["calls_total"]
                 api_429s = (
@@ -426,7 +502,9 @@ def main():
         api_429s,
     )
     write_summary(summary)
-    if not failures and len(samples["cache-miss"]) == len(DEFAULT_ALBUMS) and (
+    if not failures and len(samples["cache-miss"]) == (
+        len(DEFAULT_ALBUMS) * args.miss_iterations
+    ) and (
         len(samples["cache-hit"]) == len(DEFAULT_ALBUMS) * args.hit_iterations
     ):
         exit_code = 0

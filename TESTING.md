@@ -59,14 +59,17 @@ worker). Cache-hit samples read the durable Supabase `albums` table and are
 checked to make no Discogs API calls. The benchmark does not import releases or
 write to a Discogs collection.
 
-The workflow makes two cold lookup requests and three warm-hit requests for
-each probe album (eight validation requests total). Each lookup is capped at
+The workflow makes three cold lookup requests for each probe album and five
+warm-hit requests for each album (six misses and ten hits; sixteen validation
+requests total). Between cold samples, it verifies that the durable row still
+matches the previous result, then clears only that probe's row and Redis lookup
+markers before measuring another miss. It also checks that probe keys and
+Redis lookup state are absent before starting. Each cold lookup is capped at
 three Discogs calls, two query strategies, one page per strategy, and two
-attempts per API call. It also makes one authenticated identity request to
-confirm the supplied token belongs to the configured dummy account and stops
-on the first Discogs 429. This stays well below the configured authenticated
-Discogs rate limit in normal operation. It reports min, p50, p95, max, and
-error counts for cache misses and hits to the GitHub Actions step summary.
+attempts per API call. Including one authenticated identity request, the
+theoretical maximum is 37 Discogs API requests; the workflow stops on the first
+HTTP 429. It reports min, p50, p95, max, and error counts for cache misses and
+hits to the GitHub Actions step summary.
 
 ### One-time setup
 

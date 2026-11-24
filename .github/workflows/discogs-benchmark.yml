@@ -53,4 +53,7 @@ jobs:
           DISCOGS_LOOKUP_MAX_QUERY_STRATEGIES: "2"
           DISCOGS_LOOKUP_MAX_PAGES_PER_QUERY: "1"
           DISCOGS_MAX_RETRIES: "2"
-        run: python tests/performance/benchmark_discogs.py --hit-iterations 3
+        run: >-
+          python tests/performance/benchmark_discogs.py
+          --miss-iterations 3
+          --hit-iterations 5
