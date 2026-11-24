@@ -157,14 +157,14 @@ def main():
     parser.add_argument(
         "--miss-iterations",
         type=int,
-        default=3,
-        help="Cold cache-miss requests per album (1-3; default: 3)",
+        default=4,
+        help="Cold cache-miss requests per album (1-4; default: 4)",
     )
     parser.add_argument(
         "--hit-iterations",
         type=int,
-        default=5,
-        help="Warm cache-hit requests per album (1-5; default: 5)",
+        default=10,
+        help="Warm cache-hit requests per album (1-10; default: 10)",
     )
     args = parser.parse_args()
 
@@ -185,10 +185,10 @@ def main():
     get_discogs_call_metrics = None
     calls_before = None
 
-    if not 1 <= args.miss_iterations <= 3:
-        failures.append("--miss-iterations must be between 1 and 3")
-    if not 1 <= args.hit_iterations <= 5:
-        failures.append("--hit-iterations must be between 1 and 5")
+    if not 1 <= args.miss_iterations <= 4:
+        failures.append("--miss-iterations must be between 1 and 4")
+    if not 1 <= args.hit_iterations <= 10:
+        failures.append("--hit-iterations must be between 1 and 10")
     missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
     if missing:
         failures.append("Missing required environment values: " + ", ".join(missing))
