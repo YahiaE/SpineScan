@@ -70,8 +70,11 @@ two attempts per API call. Including one authenticated identity request, the
 theoretical maximum is 50 requests (48 lookup attempts plus up to two identity
 attempts), leaving 10 requests under the 60-request limit. Other account
 activity also uses this budget, and the workflow stops on the first HTTP 429.
-It reports min, p50, p95, max, and error counts for cache misses and hits to
-the GitHub Actions step summary.
+The runner also paces validation requests to the Flask endpoint's configured
+per-user limit (20 requests per 60-second window by default); any wait is
+outside the measured route latency. The summary distinguishes Flask route
+limits from Discogs API 429s. It reports min, p50, p95, max, and error counts
+for cache misses and hits to the GitHub Actions step summary.
 
 ### One-time setup
 

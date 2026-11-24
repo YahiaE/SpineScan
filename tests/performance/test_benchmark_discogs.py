@@ -1,7 +1,8 @@
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
-from benchmark_discogs import reset_probe_state
+from benchmark_discogs import ValidationRatePacer, reset_probe_state
 
 
 class FakeSupabase:
@@ -114,6 +115,30 @@ class ResetProbeStateTests(unittest.TestCase):
         self.assertEqual(len(self.supabase.rows), 2)
         self.assertEqual(self.redis_conn.keys, {self.pending_key, self.result_key})
         self.assertEqual(self.redis_conn.removed_from_index, [])
+
+
+class ValidationRatePacerTests(unittest.TestCase):
+    def test_waits_for_a_new_window_after_the_request_limit(self):
+        clock = [5.0]
+
+        def fake_sleep(duration):
+            clock[0] += duration
+
+        with mock.patch(
+            "benchmark_discogs.time.time", side_effect=lambda: clock[0]
+        ), mock.patch("benchmark_discogs.time.sleep", side_effect=fake_sleep) as sleep:
+            pacer = ValidationRatePacer(request_limit=2, window_seconds=60)
+            pacer.wait_for_slot()
+            pacer.wait_for_slot()
+            self.assertEqual(sleep.call_count, 0)
+
+            pacer.wait_for_slot()
+
+            self.assertEqual(sleep.call_count, 1)
+            self.assertGreaterEqual(clock[0], 60)
+
+            pacer.wait_for_slot()
+            self.assertEqual(sleep.call_count, 1)
 
 
 if __name__ == "__main__":

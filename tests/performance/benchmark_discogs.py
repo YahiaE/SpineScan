@@ -35,14 +35,48 @@ def percentile(values, fraction):
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def render_summary(samples, errors, failures, worker_count, api_calls, api_429s):
+class ValidationRatePacer:
+    def __init__(self, request_limit, window_seconds):
+        self.request_limit = request_limit
+        self.window_seconds = window_seconds
+        self.window_index = int(time.time() // window_seconds)
+        self.requests_in_window = 0
+
+    def wait_for_slot(self):
+        if self.request_limit <= 0:
+            return
+
+        current_window = int(time.time() // self.window_seconds)
+        if current_window != self.window_index:
+            self.window_index = current_window
+            self.requests_in_window = 0
+
+        if self.requests_in_window >= self.request_limit:
+            next_window_start = (self.window_index + 1) * self.window_seconds
+            time.sleep(max(next_window_start - time.time(), 0) + 0.1)
+            self.window_index = int(time.time() // self.window_seconds)
+            self.requests_in_window = 0
+
+        self.requests_in_window += 1
+
+
+def render_summary(
+    samples,
+    errors,
+    failures,
+    worker_count,
+    api_calls,
+    api_429s,
+    route_rate_limit,
+):
     phases = ("cache-miss", "cache-hit")
     lines = [
         "## SpineScan live Discogs lookup benchmark",
         "",
         "Path: Flask `POST /discogs/validate`; cache misses use synchronous "
-        "fallback (RQ workers online: {}). Discogs calls: {}; HTTP 429s: {}."
-        .format(worker_count, api_calls, api_429s),
+        "fallback (RQ workers online: {}). Flask route limit: {}. "
+        "Discogs API calls: {}; Discogs API 429s: {}."
+        .format(worker_count, route_rate_limit, api_calls, api_429s),
         "",
         "| Path | Samples | Min (ms) | p50 (ms) | p95 (ms) | Max (ms) | Errors |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -94,7 +128,9 @@ def validate_request(client, artist, title, entry_id):
     elapsed_ms = (time.perf_counter() - started) * 1000
     payload = response.get_json(silent=True)
     if response.status_code != 200:
-        return elapsed_ms, None, f"HTTP {response.status_code}"
+        return elapsed_ms, None, (
+            f"Flask validation route returned HTTP {response.status_code}"
+        )
     validations = (payload or {}).get("validations")
     if not isinstance(validations, list) or len(validations) != 1:
         return elapsed_ms, None, "validation response did not contain exactly one result"
@@ -184,6 +220,8 @@ def main():
     safe_to_cleanup = False
     get_discogs_call_metrics = None
     calls_before = None
+    validation_pacer = None
+    route_rate_limit = "unknown"
 
     if not 1 <= args.miss_iterations <= 4:
         failures.append("--miss-iterations must be between 1 and 4")
@@ -219,6 +257,10 @@ def main():
 
         try:
             from flask import session as flask_session
+            from config import (
+                DISCOGS_RATE_WINDOW_SECONDS,
+                VALIDATE_REQUESTS_PER_WINDOW,
+            )
             from app_factory import create_app
             from extensions import redis_conn as backend_redis, supabase as backend_supabase
             from services.discogs_service import (
@@ -236,6 +278,13 @@ def main():
 
             redis_conn = backend_redis
             supabase = backend_supabase
+            validation_pacer = ValidationRatePacer(
+                VALIDATE_REQUESTS_PER_WINDOW,
+                DISCOGS_RATE_WINDOW_SECONDS,
+            )
+            route_rate_limit = (
+                f"{VALIDATE_REQUESTS_PER_WINDOW}/{DISCOGS_RATE_WINDOW_SECONDS}s"
+            )
             cleanup_keys = (
                 album_lookup_pending_key,
                 album_lookup_result_key,
@@ -327,6 +376,7 @@ def main():
                     ):
                         key = album_lookup_normalized_key(artist, title)
                         before_metrics = get_discogs_call_metrics()
+                        validation_pacer.wait_for_slot()
                         elapsed, result, error = validate_request(
                             client,
                             artist,
@@ -407,6 +457,7 @@ def main():
                         artist, title = keys_by_album[key]
                         for hit_index in range(1, args.hit_iterations + 1):
                             before_metrics = get_discogs_call_metrics()
+                            validation_pacer.wait_for_slot()
                             elapsed, hit_result, error = validate_request(
                                 client,
                                 artist,
@@ -423,6 +474,8 @@ def main():
                                     "Discogs returned HTTP 429 during a cache hit; "
                                     "stopping live requests"
                                 )
+                                stop_hit_samples = True
+                            if error == "Flask validation route returned HTTP 429":
                                 stop_hit_samples = True
                             if (
                                 not error
@@ -500,6 +553,7 @@ def main():
         worker_count,
         api_calls,
         api_429s,
+        route_rate_limit,
     )
     write_summary(summary)
     if not failures and len(samples["cache-miss"]) == (
